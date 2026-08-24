@@ -1,0 +1,17 @@
+[Unit]
+Description=Enable OpenNept4une USB-C toolhead power
+Documentation=https://github.com/OpenNeptune3D/OpenNept4une
+After=local-fs.target
+Before=klipper.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/opennept4une-toolhead-power high
+# The MKS bootloader remains active for roughly ten seconds after power-up.
+# Hold Klipper until the application has had time to enumerate under its
+# persistent usb-Klipper_* identity.
+ExecStartPost=/bin/sleep 12
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

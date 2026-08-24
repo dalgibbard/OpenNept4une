@@ -21,6 +21,8 @@ FLUIDD_DB_URL="${FLUIDD_DB_URL:-https://raw.githubusercontent.com/OpenNeptune3D/
 ARM_ENV_PATH="${ARM_ENV_PATH:-/boot/armbianEnv.txt}"
 RUN_KIAUH="${RUN_KIAUH:-1}"
 NETPLAN_FILE="${NETPLAN_FILE:-/etc/netplan/10-dhcp-all-interfaces.yaml}"
+BOARD_HARDWARE_SETUP="${BOARD_HARDWARE_SETUP:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/board-hardware-setup.sh}"
+OPENNEPT4UNE_FLAG_FILE="${OPENNEPT4UNE_FLAG_FILE:-/boot/.OpenNept4une.txt}"
 
 # If your repo with spidev fixes is elsewhere, set SPIDEV_SRC_DIR before running:
 SPIDEV_SRC_DIR="${SPIDEV_SRC_DIR:-/home/${SUDO_USER}/OpenNept4une/img-config/spidev-fix}"
@@ -59,6 +61,19 @@ DB_PATH="${PDB_DIR}/data.mdb"
 
 echo "==> TARGET_USER=${TARGET_USER}"
 echo "==> TARGET_HOME=${TARGET_HOME}"
+
+# A preconfigured image may already contain its model flag. Apply board-specific
+# boot changes now so the selected DTB is active on the next boot. A generic
+# image without a model flag remains generic until set-printer-model.sh runs.
+if grep -qi '^n4' "$OPENNEPT4UNE_FLAG_FILE" 2>/dev/null; then
+  [[ -x "$BOARD_HARDWARE_SETUP" ]] || \
+    die "Preconfigured model flag exists, but board integration is missing or not executable: ${BOARD_HARDWARE_SETUP}"
+  echo "==> Applying board hardware selection from ${OPENNEPT4UNE_FLAG_FILE}"
+  "$BOARD_HARDWARE_SETUP" apply --from-flag || \
+    die "Failed to apply preconfigured board hardware selection"
+else
+  echo "==> No preconfigured model flag found; deferring board hardware setup"
+fi
 
 # ===== Load rk805 PMIC driver at boot (for enabling mainboard power LEDs) =====
 printf "pinctrl-rk805\n" | tee /etc/modules-load.d/rk805.conf >/dev/null

@@ -4,6 +4,21 @@
   <h1 align="center">De-Elegoo-izing the Neptune 4 Series 3D Printers</h1>
 </p>
 
+> [!CAUTION]
+> **Experimental—use entirely at your own risk.** This path has not yet
+> completed physical validation on a Neptune 4 Max with `ZNP-K1-2.3` and a
+> USB-C toolhead. Flashing can erase firmware, and an incorrect hardware or
+> configuration assumption can cause unsafe motion, heating, hardware damage,
+> or injury. Make verified backups, obtain matching recovery firmware, keep
+> clear of the machine, and perform the documented cold checks. This work is
+> provided without warranty; the fork maintainers and contributors accept no
+> responsibility for damage, data loss, injury, or other consequences.
+>
+> For this exact hardware, follow the
+> [full bring-up and recovery guide](docs/neptune-4-max-znp-k1-2.3-usb-c-guide.md).
+> Implementation status and remaining physical validation are in the
+> [board support notes](docs/znp-k1-v2.3-usb-c.md).
+
 ---
 
 <div align="center">
@@ -71,5 +86,3 @@ And our GitHub [Contributors](https://github.com/OpenNeptune3D/OpenNept4une/grap
   - [fluidd:](https://github.com/fluidd-core/fluidd)
   - [mainsail](https://github.com/mainsail-crew/mainsail)
   - [mobileraker](https://github.com/Clon1998/mobileraker)
-
-

@@ -1,4 +1,6 @@
 .DS_Store
+__pycache__/
+*.py[cod]
 /display/venv/
 /display/__pycache__/
 /printer-confs/output.cfg

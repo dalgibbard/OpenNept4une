@@ -12,11 +12,21 @@ BASE_IMAGE_INSTALLER="${HOME}/OpenNept4une/img-config/base_image_configuration.s
 SSH_KEY_INSTALLER="${HOME}/OpenNept4une/img-config/update-ssh-keys.sh"
 
 FLAG_FILE="/boot/.OpenNept4une.txt"
-MODEL_FROM_FLAG=$(grep -E '^N4|^n4' "$FLAG_FILE" 2>/dev/null)
-KERNEL_FROM_FLAG=$(grep 'Linux' "$FLAG_FILE" 2>/dev/null | awk '{split($3,a,"-"); print a[1]}')
+MODEL_FROM_FLAG=$(grep -E '^N4|^n4' "$FLAG_FILE" 2>/dev/null || true)
+KERNEL_FROM_FLAG=$(
+    grep 'Linux' "$FLAG_FILE" 2>/dev/null \
+        | awk '{split($3,a,"-"); print a[1]}' \
+        || true
+)
 
-OPENNEPT4UNE_REPO="https://github.com/OpenNeptune3D/OpenNept4une.git"
 OPENNEPT4UNE_DIR="${HOME}/OpenNept4une"
+OPENNEPT4UNE_OFFICIAL_REPO="https://github.com/OpenNeptune3D/OpenNept4une.git"
+REPO_UTILS="${OPENNEPT4UNE_DIR}/img-config/repo-utils.sh"
+if [ -r "$REPO_UTILS" ]; then
+    # shellcheck source=img-config/repo-utils.sh
+    source "$REPO_UTILS"
+fi
+
 DISPLAY_CONNECTOR_REPO="https://github.com/OpenNeptune3D/display_connector.git"
 DISPLAY_CONNECTOR_DIR="${HOME}/display_connector"
 DISPLAY_FIRMWARE_REPO="https://github.com/OpenNeptune3D/display_firmware.git"
@@ -194,8 +204,6 @@ process_repo_update() {
     local name="$2"
     local update_branch
     local REPLY=""
-    
-    update_branch=$(git -C "$repo_dir" branch --show-current 2>/dev/null)
 
     if [ ! -d "$repo_dir" ]; then
         printf '%b\n' "${R}Repository directory not found at $repo_dir!${NC}"
@@ -203,21 +211,42 @@ process_repo_update() {
         return 1
     fi
 
+    update_branch=$(git -C "$repo_dir" branch --show-current 2>/dev/null)
     if [ -z "$update_branch" ]; then
         printf '%b\n' "${R}Could not determine the current branch for $repo_dir!${NC}"
         sleep 5
         return 1
     fi
 
+    # Never overwrite a locally modified checkout. This is especially
+    # important while testing downstream hardware changes, and replaces the
+    # former reset --hard / clean -fd fallback for divergent branches.
+    if ! git -C "$repo_dir" diff --quiet --ignore-submodules -- ||
+       ! git -C "$repo_dir" diff --cached --quiet --ignore-submodules -- ||
+       [ -n "$(git -C "$repo_dir" ls-files --others --exclude-standard)" ]; then
+        printf '%b\n' "${R}Local changes detected in ${name}; refusing an automatic update.${NC}"
+        printf '%s\n' "Commit, stash, or back up those changes and resolve them manually."
+        sleep 1
+        return 1
+    fi
+
     # Fetch updates
-    if ! git -C "$repo_dir" fetch origin "$update_branch" --quiet; then
+    if ! git -C "$repo_dir" fetch origin \
+        "+refs/heads/${update_branch}:refs/remotes/origin/${update_branch}" --quiet; then
         printf '%b\n' "${R}Failed to fetch updates for ${name}.${NC}"
         sleep 5
         return 1
     fi
 
     LOCAL=$(git -C "$repo_dir" rev-parse '@')
-    REMOTE=$(git -C "$repo_dir" rev-parse '@{u}')
+    # Compare against the ref fetched above. A fork checkout may have its
+    # branch configured to track an "upstream" remote, which must not make the
+    # built-in updater compare against or pull from the wrong repository.
+    if ! REMOTE=$(git -C "$repo_dir" rev-parse "origin/${update_branch}" 2>/dev/null); then
+        printf '%b\n' "${R}Could not resolve origin/${update_branch} for ${name}.${NC}"
+        sleep 1
+        return 1
+    fi
 
     if [ "$LOCAL" != "$REMOTE" ]; then
         printf '%b\n' "${Y}Updates are available for ${name}.${NC}"
@@ -230,27 +259,11 @@ process_repo_update() {
 
         if [[ $REPLY =~ ^[Yy]$ ]]; then
             printf '%s\n' "Updating..."
-            # Attempt to pull and capture any errors
-            if ! UPDATE_OUTPUT=$(git -C "$repo_dir" pull origin "$update_branch" 2>&1); then
-                # Check for the specific divergent branches error message
-                if echo "$UPDATE_OUTPUT" | grep -q "divergent branches"; then
-                    printf '%b\n' "${R}Divergent branches detected, performing a hard reset to origin/${update_branch}...${NC}"
-                    sleep 1
-                    if ! git -C "$repo_dir" reset --hard "origin/${update_branch}"; then
-                        printf '%b\n' "${R}Failed to hard reset ${name}.${NC}"
-                        sleep 1
-                        return 1
-                    fi
-                    if ! git -C "$repo_dir" clean -fd; then
-                        printf '%b\n' "${R}Failed to clean ${name}.${NC}"
-                        sleep 1
-                        return 1
-                    fi
-                else
-                    printf '%b\n' "${R}Failed to update ${name}: $UPDATE_OUTPUT${NC}"
-                    sleep 1
-                    return 1
-                fi
+            if ! UPDATE_OUTPUT=$(git -C "$repo_dir" pull --ff-only origin "$update_branch" 2>&1); then
+                printf '%b\n' "${R}Failed to fast-forward ${name}: $UPDATE_OUTPUT${NC}"
+                printf '%s\n' "The checkout was left intact; resolve the branch state manually."
+                sleep 1
+                return 1
             fi
 
             printf '%b\n' "${name} ${G}Updated successfully.${NC}"
@@ -274,14 +287,20 @@ moonraker_update_manager() {
 
     if [ "$update_selection" = "OpenNept4une" ]; then
         local current_ON_branch
+        local current_ON_origin
         current_ON_branch=$(git -C "$OPENNEPT4UNE_DIR" symbolic-ref --short HEAD 2>/dev/null)
+        if declare -F resolve_git_remote_url >/dev/null; then
+            current_ON_origin=$(resolve_git_remote_url "$OPENNEPT4UNE_DIR" "origin" "$OPENNEPT4UNE_OFFICIAL_REPO")
+        else
+            current_ON_origin="$OPENNEPT4UNE_OFFICIAL_REPO"
+        fi
         new_lines=$(cat <<EOF
 [update_manager $update_selection]
 type: git_repo
 primary_branch: $current_ON_branch
 path: $OPENNEPT4UNE_DIR
 is_system_service: False
-origin: $OPENNEPT4UNE_REPO
+origin: $current_ON_origin
 EOF
 )
 
@@ -397,6 +416,7 @@ install_feature() {
     local feature_name="$1"
     local action="$2"  # This can be a script path or direct commands
     local prompt_message="$3"
+    local action_rc=0
 
     clear_screen
     printf '%b\n' "${C}${OPENNEPT4UNE_ART}${NC}"
@@ -420,6 +440,7 @@ install_feature() {
                 printf '%b\n' "${G}$feature_name Installer ran successfully.${NC}"
                 sleep 2
             else
+                action_rc=$?
                 printf '%b\n' "${R}$feature_name Installer encountered an error.${NC}"
                 sleep 1
             fi
@@ -428,10 +449,12 @@ install_feature() {
                 printf '%b\n' "${G}$feature_name Installer ran successfully.${NC}"
                 sleep 2
             else
+                action_rc=$?
                 printf '%b\n' "${R}$feature_name Installer encountered an error.${NC}"
                 sleep 1
             fi
         else
+            action_rc=1
             printf '%b\n' "${R}Error: Action for $feature_name not found or not specified.${NC}"
             sleep 1
         fi
@@ -441,6 +464,7 @@ install_feature() {
     fi
 
     printf '%s\n' "=========================================================="
+    return "$action_rc"
 }
 
 android_rules() {
@@ -548,22 +572,40 @@ display_firmware() {
     install_feature "Flash/Update Display Firmware (Alpha)" "$UPDATED_DISPLAY_FIRMWARE_INSTALLER" "Do you want to run Flash/Update Display Firmware (Alpha)?"
 }
 
-check_and_set_printer_model() {
+set_printer_model() {
+    local model_installer="${HOME}/OpenNept4une/img-config/set-printer-model.sh"
+
+    if [ ! -f "$model_installer" ]; then
+        printf '%b\n' "${R}Error: set-printer-model.sh not found.${NC}"
+        return 1
+    fi
+
+    export model_key motor_current pcb_version auto_yes toolhead_variant
+    if ! "$model_installer"; then
+        printf '%b\n' "${R}Failed to apply the requested printer model.${NC}"
+        return 1
+    fi
+
+    MODEL_FROM_FLAG=$(grep -E '^N4|^n4' "$FLAG_FILE" 2>/dev/null || true)
     if [ -z "$MODEL_FROM_FLAG" ]; then
-        printf '%s\n' "Model Flag is empty. Running Set Model script..."
-        if [ -f "${HOME}/OpenNept4une/img-config/set-printer-model.sh" ]; then
-            export model_key motor_current pcb_version auto_yes toolhead_variant
-            "${HOME}/OpenNept4une/img-config/set-printer-model.sh"
+        printf '%s\n' "Failed to set Model Flag. Exiting."
+        return 1
+    fi
+    printf '%s\n' "Model Flag set successfully: $MODEL_FROM_FLAG"
+}
+
+check_and_set_printer_model() {
+    # An explicit --printer_model selection must win over an existing image
+    # flag; otherwise --pcb_version 2.3 can be silently ignored on a release
+    # image that was previously configured for another revision.
+    if [ -n "$model_key" ] || [ -z "$MODEL_FROM_FLAG" ]; then
+        if [ -n "$model_key" ]; then
+            printf '%s\n' "Applying explicitly requested printer model..."
         else
-            printf '%b\n' "${R}Error: set-printer-model.sh not found.${NC}"
-            return 1
+            printf '%s\n' "Model Flag is empty. Running Set Model script..."
         fi
-        MODEL_FROM_FLAG=$(grep -E '^N4|^n4' "$FLAG_FILE" 2>/dev/null)
-        if [ -z "$MODEL_FROM_FLAG" ]; then
-            printf '%s\n' "Failed to set Model Flag. Exiting."
+        if ! set_printer_model; then
             return 1
-        else
-            printf '%s\n' "Model Flag set successfully."
         fi
         return 0
     else
@@ -613,8 +655,11 @@ update_toolhead_flag() {
     fi
 
     if [ "$new_flag" != "$MODEL_FROM_FLAG" ]; then
-        sudo sed -i '/^n4/I d' "$FLAG_FILE"
-        echo "$new_flag" | sudo tee -a "$FLAG_FILE" > /dev/null
+        if ! declare -F write_model_flag_atomic >/dev/null ||
+           ! write_model_flag_atomic "$FLAG_FILE" "$new_flag"; then
+            printf '%b\n' "${R}Failed to persist the toolhead selection atomically.${NC}"
+            return 1
+        fi
         sync
         MODEL_FROM_FLAG="$new_flag"
     fi
@@ -643,7 +688,9 @@ install_printer_cfg() {
             printf '%b\n' "${R}ERROR: --toolhead usb-c specified but no USB-C Klipper toolhead detected (expected /dev/serial/by-id/usb-Klipper_stm32f103xe_*).${NC}"
             return 1
         fi
-        update_toolhead_flag "$toolhead_variant"
+        if ! update_toolhead_flag "$toolhead_variant"; then
+            return 1
+        fi
     elif [ -n "$flag_toolhead" ] && echo "$MODEL_FROM_FLAG" | grep -qE -- '-t(ribbon|usbc)$'; then
         # Toolhead variant already recorded in the model flag from a
         # previous run (or initial setup) - reuse it without prompting.
@@ -672,7 +719,25 @@ install_printer_cfg() {
                 fi
             done
         fi
-        update_toolhead_flag "$toolhead_variant"
+        if ! update_toolhead_flag "$toolhead_variant"; then
+            return 1
+        fi
+    fi
+
+    # Reconcile even when the model came from an existing/legacy flag. This
+    # repairs images configured by older scripts that recorded v2.3/USB-C but
+    # never installed the DTB or persistent GPIO82 service.
+    local board_hardware_setup="${HOME}/OpenNept4une/img-config/board-hardware-setup.sh"
+    if [ ! -x "$board_hardware_setup" ]; then
+        printf '%b\n' "${R}Board hardware setup is missing or not executable: ${board_hardware_setup}${NC}"
+        return 1
+    fi
+    if ! sudo "$board_hardware_setup" apply \
+        --model "$model_key" \
+        --pcb-version "$pcb_version" \
+        --toolhead "$toolhead_variant"; then
+        printf '%b\n' "${R}Failed to reconcile board-specific hardware before config generation.${NC}"
+        return 1
     fi
 
     # Build config based on user selection
@@ -818,6 +883,14 @@ install_configs() {
             mv -f "$tmp" "$dst"
         else
             cp -f "$src" "$dst"
+        fi
+
+        # The stock template necessarily contains the official upstream URL.
+        # Replace its OpenNept4une block with the installed checkout's current
+        # origin immediately, otherwise installing "Moonraker Conf" would undo
+        # the fork-safe update-manager configuration.
+        if [[ "$f" == "moonraker.conf" ]]; then
+            moonraker_update_manager "OpenNept4une"
         fi
 
         printf '%s\n' "${G}${f} installed to ${dst}.${NC}"
@@ -981,7 +1054,6 @@ install_screen_service() {
 }
 
 run_install_screen_service_with_setup() {
-    rm -rf "${HOME}/display_connector"
     if initialize_display_connector && [ -f "$DISPLAY_SERVICE_INSTALLER" ]; then
         bash "$DISPLAY_SERVICE_INSTALLER"
     else
@@ -991,11 +1063,28 @@ run_install_screen_service_with_setup() {
 }
 
 initialize_display_connector() {
+    local display_branch
+
+    if [ -z "$current_branch" ]; then
+        set_current_branch
+    fi
+    if [ -z "$current_branch" ]; then
+        printf '%b\n' "${R}Could not determine the OpenNept4une branch for Display Connector.${NC}"
+        return 1
+    fi
+
     if [ ! -d "${HOME}/display_connector" ]; then
         if git clone -b "$current_branch" "${DISPLAY_CONNECTOR_REPO}" "${DISPLAY_CONNECTOR_DIR}"; then
             printf '%b\n' "${G}Initialized repository for Touch-Screen Display Service.${NC}"
         else
             printf '%b\n' "${R}Failed to clone Display Connector repository.${NC}"
+            return 1
+        fi
+    else
+        display_branch=$(git -C "$DISPLAY_CONNECTOR_DIR" branch --show-current 2>/dev/null || true)
+        if [ "$display_branch" != "$current_branch" ]; then
+            printf '%b\n' "${R}Display Connector is on '${display_branch:-unknown}', but OpenNept4une is on '${current_branch}'.${NC}"
+            printf '%s\n' "Back up or explicitly switch the existing checkout; it was left untouched."
             return 1
         fi
     fi
@@ -1034,10 +1123,12 @@ Options:
   -y, --yes                  Automatically confirm all prompts (non-interactive mode).
   --printer_model=MODEL      Specify the printer model (e.g., n4, n4pro, n4plus / n4max).
   --motor_current=VALUE      Specify the stepper motor current (e.g., 0.8, 1.2).
+  --pcb_version=VERSION      Specify the controller PCB revision (for example, 2.3).
   --toolhead=TYPE            Specify the printhead variant: ribbon (default) or usb-c.
   -h, --help                 Display this help message and exit.
 
 Commands:
+  set_printer_model         Persist model/PCB/toolhead hardware before firmware or config generation.
   install_printer_cfg        Install or update the OpenNept4une Printer.cfg and other configurations.
   install_configs            Install or update KAMP/Moonraker/fluiddGUI confs, etc.
   wifi_config                Launch NMTUI for WiFi configuration.
@@ -1071,6 +1162,12 @@ print_menu() {
     printf '%s\n' "=========================================================="
     printf '%s\n' "Select an option by entering (1-7 / q):"
 }
+
+# Allow the function library to be sourced by hardware-independent tests and
+# maintenance tooling without running fixes or opening the interactive menu.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
 
 # Parse Command-Line Arguments
 if ! TEMP=$(getopt -o yh --long yes,help,printer_model:,motor_current:,pcb_version:,toolhead: -n 'OpenNept4une.sh' -- "$@"); then
@@ -1122,8 +1219,10 @@ if [ -z "$1" ]; then
     done
 else
     run_fixes
+    set_current_branch
     COMMAND="$1"
     case "$COMMAND" in
+        set_printer_model) set_printer_model ;;
         install_printer_cfg) install_printer_cfg ;;
         install_configs) install_configs ;;
         wifi_config) wifi_config ;;

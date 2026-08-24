@@ -10,7 +10,10 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 
 variable_regex = re.compile(r'{{\s*(\w+)\s*}}')
 
-USB_TOOLHEAD_SERIAL_GLOB = "/dev/serial/by-id/usb-Klipper_stm32f103xe_*"
+USB_TOOLHEAD_SERIAL_GLOB = os.environ.get(
+    'OPENNEPT4UNE_USB_TOOLHEAD_SERIAL_GLOB',
+    "/dev/serial/by-id/usb-Klipper_stm32f103xe_*",
+)
 
 # section_*.cfg name -> toolhead-specific replacement filename (relative to
 # the toolheads/ folder), keyed by toolhead variant -> printer model group.
@@ -31,18 +34,32 @@ USB_C_ACCEL_SECTION_BY_MODEL = {
 }
 
 
-def get_toolhead_conf(toolhead):
+def get_toolhead_conf(toolhead, printer_model=None):
     """
     Read the pin-mapping/placeholder file for the selected toolhead variant
-    (printer-confs/toolheads/<toolhead>.cfg). Exits with an error if it's
-    missing or the variant is unrecognized.
+    (printer-confs/toolheads/<toolhead>.cfg). A model-specific file named
+    <toolhead>-<printer_model>.cfg, when present, takes precedence. Exits with
+    an error if the generic variant is missing or unrecognized.
     """
     toolhead_path = os.path.join(script_dir, 'toolheads', f"{toolhead}.cfg")
     if not os.path.isfile(toolhead_path):
         print(f"ERROR: unknown toolhead variant '{toolhead}' ({toolhead_path} does not exist).")
         sys.exit(1)
+    lines = []
+    if printer_model:
+        model_override_path = os.path.join(
+            script_dir, 'toolheads', f"{toolhead}-{printer_model}.cfg"
+        )
+        if os.path.isfile(model_override_path):
+            with open(model_override_path, 'r') as f:
+                lines.extend(f.readlines())
+
+    # Overrides are deliberately loaded first. Placeholder substitution is
+    # first-match-wins, so the generic and printer-model values remain as safe
+    # fallbacks for keys not present in the override.
     with open(toolhead_path, 'r') as f:
-        return f.readlines()
+        lines.extend(f.readlines())
+    return lines
 
 
 def generate_mcu_id_cfg():
@@ -131,7 +148,7 @@ def generate_conf(printer_model, current, toolhead='ribbon'):
         generate_mcu_id_cfg()
 
     # Read toolhead pin-mapping/placeholder file, then printer-specific files
-    toolhead_conf = get_toolhead_conf(toolhead)
+    toolhead_conf = get_toolhead_conf(toolhead, printer_model)
     printer_conf = get_printer_conf(printer_model, current)
 
     # Replace placeholders using regex so whitespace variations are accepted
