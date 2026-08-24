@@ -208,7 +208,7 @@ paths separately:
 |---|---:|---|---|
 | Linux SBC, Klipper config, Moonraker data | Yes | Read-only mount as above | Verified raw image plus the config archive |
 | Main STM32 MCU | No | Possible in principle through the STM32 ROM UART bootloader only if readout protection is off; the v2.3 entry/reset path is not validated | Matching factory binary, or the exact archived Klipper build and microSD files |
-| USB-C toolhead MCU | No | Not through the known MKS USB bootloader; its protocol has no flash-read command | Matching factory binary, or the exact archived Klipper application while its bootloader still enumerates |
+| USB-C toolhead MCU | No | Not through the documented MKS USB bootloader protocol; no flash-read command is known or implemented | Matching factory binary, or the exact archived Klipper application while its bootloader still enumerates |
 | Stock touchscreen | No | No supported readback procedure is established here | Record its version and retain an exact matching vendor update package |
 
 The repository's `mcu-firmware/alt-method/mcu-swflash-run.sh` demonstrates an
@@ -221,7 +221,12 @@ bootloader path have been validated on real hardware.
 
 The bundled toolhead flasher implements only HELLO, START/END/ABORT, and
 host-to-MCU DATA. Its per-page read-back is internal verification and does not
-return firmware bytes, so it cannot dump the factory toolhead application.
+return firmware bytes. No read command is known or implemented by the
+documented protocol, so this path cannot dump the factory toolhead application;
+that does not prove an undocumented vendor command cannot exist. Its START
+operation erases the 96 KiB application range at
+`0x08008000`-`0x08020000`, leaving the first 32 KiB custom USB bootloader
+outside that range; preserving that bootloader is the non-invasive retry path.
 Physical SWD might be able to read either MCU if the exact pads are known and
 readout protection is disabled, but that path is invasive and unverified here.
 Do **not** use a readout-unprotect operation as an experiment. For the target
@@ -845,11 +850,11 @@ udevadm info --query=property \
 ```
 
 This is an identity/configuration record, **not** a factory-firmware backup.
-The MKS USB bootloader cannot return application bytes. If returning to the
-exact factory toolhead application is a hard requirement and you do not have a
-matching Elegoo binary, stop here. Do not assume the Type-C eMMC recovery image
-contains separate MCU firmware until its contents and target have been
-verified.
+The documented MKS USB protocol has no known or implemented application-read
+command. If returning to the exact factory toolhead application is a hard
+requirement and you do not have a matching Elegoo binary, stop here. Do not
+assume the Type-C eMMC recovery image contains separate MCU firmware until its
+contents and target have been verified.
 
 It is acceptable if the pre-Klipper application does not match `usb-Klipper_stm32f103xe_*`; that exact production identity is the current TODO. The updater can use the persisted board selection to enter the bootloader through GPIO82.
 
@@ -873,17 +878,24 @@ Run the MCU updater and choose only **USB-C Toolhead**:
 
 The patched flow performs these gates before writing:
 
-1. builds the STM32F103xE-layout firmware with the tested Cortex-M4 override for the physical GD32F303-compatible part;
-2. rejects an empty image or one larger than the 96 KiB application region;
-3. archives the binary, expanded `.config`, target metadata, pinned Klipper commit, size, and checksums under `~/printer_data/config/Firmware/builds/` and refuses to write if archival fails;
-4. compiles the bundled pinned `n4flash` source locally;
-5. requires the literal confirmation `FLASH`;
-6. stops Klipper only after establishing its service state and restores it on exit;
-7. cycles GPIO82 through the installed helper;
-8. requires exactly one `/dev/serial/by-id/usb-MKS_DRIVER_BOOT_*` path;
-9. confirms that path has VID/PID `1d50:018a` through udev;
-10. saves the bootloader identity before writing, invokes `n4flash` with that persistent path, and then saves/verifies the final Klipper application identity plus `MCU_ID.cfg` before reporting success;
-11. pins the Klipper source SHA so the separate main, toolhead, and virtual-MCU runs cannot silently mix protocol revisions.
+1. obtains a process-wide updater lock before touching Klipper's shared `.config` or `out/` directory;
+2. pins the Klipper source SHA so the separate main, toolhead, and virtual-MCU runs cannot silently mix protocol revisions;
+3. builds the STM32F103xE-layout firmware with the tested Cortex-M4 override for the physical GD32F303-compatible part;
+4. validates the target-specific expanded config and rejects an empty image or one larger than the 96 KiB application region;
+5. archives and flushes the binary, expanded `.config`, target metadata, pinned Klipper commit, size, and checksums under `~/printer_data/config/Firmware/builds/`, then revalidates and flashes that archived copy rather than mutable `~/klipper/out/klipper.bin`;
+6. compiles the bundled pinned `n4flash` source locally;
+7. requires the literal confirmation `FLASH`;
+8. stops Klipper only after establishing its service state and restores it on exit;
+9. cycles GPIO82 through the installed helper;
+10. requires exactly one `/dev/serial/by-id/usb-MKS_DRIVER_BOOT_*` path;
+11. confirms that path has VID/PID `1d50:018a` through udev;
+12. revalidates the archive after the confirmation/device-selection interval, requires its original firmware digest, copies it into a private mode-`0400` snapshot, and gives that snapshot—not the user-readable archive path—to `n4flash`;
+13. saves the bootloader identity before writing and then saves/verifies the final Klipper application identity plus `MCU_ID.cfg` before reporting success.
+
+On the first hardware flash, pause at the `FLASH` prompt and copy the exact
+reported toolhead archive directory to the workstation from a second terminal.
+The updater has flushed and verified it at that point, but has not yet erased
+the application. Then type `FLASH` only after the off-device copy verifies.
 
 If the bootloader name or VID/PID differs, the updater refuses to flash and prints diagnostics. Save that output; update the detection only after the physical identity is understood. Do **not** weaken the guard to select `/dev/ttyACM0`.
 
@@ -909,7 +921,7 @@ for build_dir in ~/printer_data/config/Firmware/builds/*; do
 done
 ```
 
-The updater writes `[mcu THR]` to `MCU_ID.cfg` only when exactly one final application by-id path exists. If the transfer is interrupted, do not proceed to configuration: keep power stable, re-enter the `usb-MKS_DRIVER_BOOT_*` bootloader, and rerun the same guarded updater. The bootloader should remain available even though the application region was erased.
+The updater writes `[mcu THR]` to `MCU_ID.cfg` only when exactly one final application by-id path exists. If the transfer is interrupted, do not proceed to configuration: keep power stable, re-enter the `usb-MKS_DRIVER_BOOT_*` bootloader, rerun the updater, and choose **USB-C Toolhead Recovery** with the archive just created. The bootloader should remain available even though the application region was erased.
 
 Copy the newly reported build-archive directory off the printer and verify its
 checksum manifest there. A later `make clean` or another MCU build overwrites
@@ -951,6 +963,20 @@ bundle has this form:
 ```
 
 `<TARGET>` is `main-mcu` or `usb-c-toolhead`.
+
+After both builds, make one downloadable recovery bundle containing the build
+archives, pinned commit, staged main-MCU files, and captured USB identities:
+
+```bash
+recovery_stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+recovery_tar="$HOME/printer_data/config/n4max-firmware-recovery-${recovery_stamp}.tar.gz"
+tar -C "$HOME/printer_data/config" -czf "$recovery_tar" Firmware
+sha256sum "$recovery_tar" > "${recovery_tar}.sha256"
+printf 'Recovery bundle: %s\n' "$recovery_tar"
+```
+
+Download the `.tar.gz` and its `.sha256` through Fluidd and keep them with the
+raw eMMC/config backups.
 
 Download both through Fluidd, or copy them from the printer. Put both in the root of a small FAT32-formatted microSD card. Then:
 
@@ -1615,14 +1641,22 @@ machine.
 If `usb-MKS_DRIVER_BOOT_*` appears but the Klipper application does not, the
 custom bootloader is still alive. Keep power stable, confirm the pinned Klipper
 commit and archived build, then rerun the guarded updater and choose **USB-C
-Toolhead**. It accepts an already-present bootloader and can rebuild/retry the
-application without the previous application serial device:
+Toolhead Recovery**. It selects one managed toolhead archive, constrains and
+verifies its checksum manifest, target metadata, config, size, and source
+commit, then digest-binds and flashes a private snapshot of its exact
+`klipper.bin` through the same service, bootloader-identity, VID:PID, and
+confirmation gates. It accepts an already-present bootloader and does not need
+the previous application serial device:
 
 ```bash
 cat ~/printer_data/config/Firmware/klipper-build-source.commit
 find ~/printer_data/config/Firmware/builds -maxdepth 3 -type f -print
 ~/OpenNept4une/OpenNept4une.sh update_mcu_rpi_fw
 ```
+
+The selected archive's Klipper commit must match both the current Klipper
+checkout and `klipper-build-source.commit`. If it does not, stop and restore
+the recorded coordinated source/MCU set; do not weaken that compatibility gate.
 
 Do not bypass the identity/VID:PID/service guards with a guessed tty. If neither
 the application nor bootloader enumerates after the power-service, cable, and

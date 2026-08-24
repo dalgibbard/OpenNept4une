@@ -10,11 +10,33 @@ export HOME="${TEST_ROOT}/home"
 export OPENNEPT4UNE_RPI_MCU_INSTALL_LIB_ONLY=1
 mkdir -p "$HOME" "${TEST_ROOT}/serial-by-id"
 
+# Scratch cleanup paths are owned by the updater process and must never be
+# inherited from its caller's environment.
+env \
+    HOME="$HOME" \
+    OPENNEPT4UNE_RPI_MCU_INSTALL_LIB_ONLY=1 \
+    TOOLHEAD_FLASH_SNAPSHOT_DIR="${TEST_ROOT}/inherited-dir" \
+    TOOLHEAD_FLASH_SNAPSHOT_FILE="${TEST_ROOT}/inherited-file" \
+    bash -c 'source "$1"; test -z "${TOOLHEAD_FLASH_SNAPSHOT_DIR:-}"; test -z "${TOOLHEAD_FLASH_SNAPSHOT_FILE:-}"' \
+    _ "$INSTALLER"
+
 # shellcheck source=../img-config/rpi-mcu-install.sh
 source "$INSTALLER"
 
 # Exercise commands that are privileged on a printer against local fixtures.
 sudo() { "$@"; }
+
+# The updater must hold one process-wide lock while it uses Klipper's shared
+# .config and out/ paths. A competing process must fail without waiting.
+MCU_UPDATE_LOCK_FILE="${TEST_ROOT}/firmware/.mcu-update.lock"
+acquire_mcu_update_lock
+test -n "${MCU_UPDATE_LOCK_FD:-}"
+if flock -n "$MCU_UPDATE_LOCK_FILE" -c true 2>/dev/null; then
+    echo "a competing process unexpectedly acquired the MCU updater lock" >&2
+    exit 1
+fi
+release_mcu_update_lock
+flock -n "$MCU_UPDATE_LOCK_FILE" -c true
 
 # Separate MCU runs must stay pinned to one Klipper source revision, and the
 # updater must reject a silently changed checkout until the operator starts a
@@ -43,18 +65,26 @@ if pin_klipper_source_commit >/dev/null 2>&1; then
 fi
 rm -f "$KLIPPER_DIR/untracked.txt"
 
-# Every destructive MCU workflow must first publish an immutable, verified
-# archive of its newly built binary, expanded config, and pinned source.
+# Every destructive MCU workflow must first publish a verified archive that the
+# updater will not overwrite, containing the built binary, config, and source.
 archive_firmware="${TEST_ROOT}/archive-fixture.bin"
 archive_config="${KLIPPER_DIR}/.config"
 printf '%s\n' 'fixture firmware payload' > "$archive_firmware"
-printf '%s\n' 'CONFIG_MACH_STM32=y' 'CONFIG_SERIAL=y' > "$archive_config"
+printf '%s\n' \
+    'CONFIG_MACH_STM32=y' \
+    'CONFIG_MACH_STM32F4=y' \
+    'CONFIG_MACH_STM32F401=y' \
+    'CONFIG_SERIAL=y' \
+    'CONFIG_STM32_SERIAL_USART1=y' \
+    > "$archive_config"
 FIRMWARE_BUILD_ARCHIVE_ROOT="${TEST_ROOT}/firmware/builds"
 OPENNEPT4UNE_BUILD_ARCHIVE_UTC="2026-08-24T12:34:56Z"
 archive_dir="${FIRMWARE_BUILD_ARCHIVE_ROOT}/20260824T123456Z-main-mcu-${commit_a:0:12}"
+archive_stderr="${TEST_ROOT}/main-archive.stderr"
 archive_output=$(archive_klipper_firmware_build \
-    main-mcu "$archive_firmware" "$archive_config")
-grep -Fq "Archived main-mcu firmware build: ${archive_dir}" <<<"$archive_output"
+    main-mcu "$archive_firmware" "$archive_config" 2>"$archive_stderr")
+test "$archive_output" = "$archive_dir"
+grep -Fq "Archived main-mcu firmware build: ${archive_dir}" "$archive_stderr"
 test -d "$archive_dir"
 cmp "$archive_firmware" "${archive_dir}/klipper.bin"
 cmp "$archive_config" "${archive_dir}/klipper.config"
@@ -64,6 +94,8 @@ grep -Fxq 'created_utc=2026-08-24T12:34:56Z' \
     "${archive_dir}/build-metadata.txt"
 grep -Fxq "klipper_commit=${commit_a}" "${archive_dir}/build-metadata.txt"
 grep -Fxq "firmware_bytes=$(stat -c '%s' "$archive_firmware")" \
+    "${archive_dir}/build-metadata.txt"
+grep -Fxq 'build_invocation_hint=make' \
     "${archive_dir}/build-metadata.txt"
 (
     cd "$archive_dir"
@@ -88,16 +120,103 @@ fi
 
 OPENNEPT4UNE_BUILD_ARCHIVE_UTC="2026-08-24T12:34:57Z"
 toolhead_archive_dir="${FIRMWARE_BUILD_ARCHIVE_ROOT}/20260824T123457Z-usb-c-toolhead-${commit_a:0:12}"
+if archive_klipper_firmware_build \
+    usb-c-toolhead "$archive_firmware" "$archive_config" >/dev/null 2>&1; then
+    echo "toolhead archiver unexpectedly accepted a main-MCU config" >&2
+    exit 1
+fi
+printf '%s\n' \
+    'CONFIG_MACH_STM32=y' \
+    'CONFIG_MACH_STM32F103=y' \
+    'CONFIG_STM32_FLASH_START_8000=y' \
+    'CONFIG_STM32_USB_PA11_PA12=y' \
+    > "$archive_config"
 toolhead_archive_output=$(archive_klipper_firmware_build \
-    usb-c-toolhead "$archive_firmware" "$archive_config")
+    usb-c-toolhead "$archive_firmware" "$archive_config" \
+    2>"${TEST_ROOT}/toolhead-archive.stderr")
+test "$toolhead_archive_output" = "$toolhead_archive_dir"
 grep -Fq "Archived usb-c-toolhead firmware build: ${toolhead_archive_dir}" \
-    <<<"$toolhead_archive_output"
+    "${TEST_ROOT}/toolhead-archive.stderr"
 grep -Fxq 'target=usb-c-toolhead' \
+    "${toolhead_archive_dir}/build-metadata.txt"
+grep -Fxq 'build_invocation_hint=make MCU_UPPER=STM32F103xE -mcpu=cortex-m4' \
     "${toolhead_archive_dir}/build-metadata.txt"
 (
     cd "$toolhead_archive_dir"
     sha256sum --check --strict SHA256SUMS >/dev/null
 )
+validated_toolhead_firmware=$(validate_firmware_build_archive \
+    usb-c-toolhead "$toolhead_archive_dir")
+test "$validated_toolhead_firmware" = "${toolhead_archive_dir}/klipper.bin"
+toolhead_expected_sha=$(archive_firmware_sha256 "$toolhead_archive_dir")
+test "${#toolhead_expected_sha}" -eq 64
+TOOLHEAD_FLASH_SNAPSHOT_ROOT="${TEST_ROOT}/flash-snapshots"
+prepare_toolhead_flash_snapshot \
+    "$validated_toolhead_firmware" "$toolhead_expected_sha"
+test -f "$TOOLHEAD_FLASH_SNAPSHOT_FILE"
+test "$(stat -c '%a' "$TOOLHEAD_FLASH_SNAPSHOT_FILE")" = "400"
+cmp "$validated_toolhead_firmware" "$TOOLHEAD_FLASH_SNAPSHOT_FILE"
+snapshot_dir="$TOOLHEAD_FLASH_SNAPSHOT_DIR"
+cleanup_toolhead_flash_snapshot
+test ! -e "$snapshot_dir"
+
+# Cleanup must not follow a textually valid snapshot path through a symlink or
+# accept a file other than the exact process-created klipper.bin path.
+outside_snapshot_dir="${TEST_ROOT}/outside-snapshot"
+mkdir -p "$outside_snapshot_dir" "$TOOLHEAD_FLASH_SNAPSHOT_ROOT"
+printf '%s\n' 'must survive cleanup refusal' > "${outside_snapshot_dir}/klipper.bin"
+TOOLHEAD_FLASH_SNAPSHOT_DIR="${TOOLHEAD_FLASH_SNAPSHOT_ROOT}/toolhead-flash.link"
+TOOLHEAD_FLASH_SNAPSHOT_FILE="${TOOLHEAD_FLASH_SNAPSHOT_DIR}/klipper.bin"
+ln -s "$outside_snapshot_dir" "$TOOLHEAD_FLASH_SNAPSHOT_DIR"
+if cleanup_toolhead_flash_snapshot >/dev/null 2>&1; then
+    echo "snapshot cleanup unexpectedly followed a linked directory" >&2
+    exit 1
+fi
+test -f "${outside_snapshot_dir}/klipper.bin"
+rm -f "$TOOLHEAD_FLASH_SNAPSHOT_DIR"
+unset TOOLHEAD_FLASH_SNAPSHOT_DIR TOOLHEAD_FLASH_SNAPSHOT_FILE
+
+mkdir -p "${TOOLHEAD_FLASH_SNAPSHOT_ROOT}/toolhead-flash.mismatch"
+TOOLHEAD_FLASH_SNAPSHOT_DIR="${TOOLHEAD_FLASH_SNAPSHOT_ROOT}/toolhead-flash.mismatch"
+TOOLHEAD_FLASH_SNAPSHOT_FILE="${TOOLHEAD_FLASH_SNAPSHOT_DIR}/unrelated.bin"
+printf '%s\n' 'must also survive' > "$TOOLHEAD_FLASH_SNAPSHOT_FILE"
+if cleanup_toolhead_flash_snapshot >/dev/null 2>&1; then
+    echo "snapshot cleanup unexpectedly accepted a mismatched file path" >&2
+    exit 1
+fi
+test -f "$TOOLHEAD_FLASH_SNAPSHOT_FILE"
+rm -f "$TOOLHEAD_FLASH_SNAPSHOT_FILE"
+rmdir "$TOOLHEAD_FLASH_SNAPSHOT_DIR"
+unset TOOLHEAD_FLASH_SNAPSHOT_DIR TOOLHEAD_FLASH_SNAPSHOT_FILE
+
+unset SELECTED_USB_TOOLHEAD_RECOVERY_ARCHIVE
+select_usb_toolhead_recovery_archive <<<"1" >/dev/null 2>&1
+test "$SELECTED_USB_TOOLHEAD_RECOVERY_ARCHIVE" = "$toolhead_archive_dir"
+
+# Recovery validation must reject tampering and paths outside the managed root.
+printf '%s\n' 'tampered firmware' > "${toolhead_archive_dir}/klipper.bin"
+if validate_firmware_build_archive \
+    usb-c-toolhead "$toolhead_archive_dir" >/dev/null 2>&1; then
+    echo "recovery validator unexpectedly accepted tampered firmware" >&2
+    exit 1
+fi
+cp "$archive_firmware" "${toolhead_archive_dir}/klipper.bin"
+validate_firmware_build_archive \
+    usb-c-toolhead "$toolhead_archive_dir" >/dev/null
+outside_archive="${TEST_ROOT}/outside-usb-c-toolhead-archive"
+cp -a "$toolhead_archive_dir" "$outside_archive"
+if validate_firmware_build_archive \
+    usb-c-toolhead "$outside_archive" >/dev/null 2>&1; then
+    echo "recovery validator unexpectedly accepted an outside archive" >&2
+    exit 1
+fi
+printf '%s\n' "$commit_b" > "$KLIPPER_SOURCE_PIN"
+if validate_firmware_build_archive \
+    usb-c-toolhead "$toolhead_archive_dir" >/dev/null 2>&1; then
+    echo "recovery validator unexpectedly accepted a mismatched pinned commit" >&2
+    exit 1
+fi
+printf '%s\n' "$commit_a" > "$KLIPPER_SOURCE_PIN"
 
 # An unwritable/invalid archive root is a hard failure; callers must not be
 # able to continue toward staging or flashing without the recovery artifact.

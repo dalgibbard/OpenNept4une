@@ -46,6 +46,16 @@ raw backup of the original eMMC before testing it.
   checksums. The updater never overwrites an existing archive, and an archival
   failure blocks the flash. These are OpenNept4une recovery artifacts, not
   factory-firmware dumps.
+- A process-wide lock serializes all MCU updater runs that share Klipper's
+  `.config` and `out/` directory. Main/toolhead archives must also pass
+  target-specific config checks. Normal USB-C flashing uses the flushed,
+  revalidated archived copy, not mutable build output.
+- **USB-C Toolhead Recovery** verifies and flashes an exact managed archive
+  through the same persistent-device, VID:PID, service-restoration, and typed
+  confirmation gates; it requires the archive, current Klipper checkout, and
+  pinned coordinated MCU source to agree. It revalidates after interactive
+  device selection, binds the original firmware digest, and flashes a private
+  read-only snapshot to close the ordinary archive-change window.
 - The top-level command propagates installer failures, and the display
   initializer preserves/refuses a mismatched existing checkout rather than
   deleting it.

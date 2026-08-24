@@ -18,6 +18,12 @@ USB_TOOLHEAD_MAX_FIRMWARE_BYTES=$((96 * 1024))
 USB_TOOLHEAD_IDENTITY_DIR="${FIRMWARE_DIR}/usb-c-identities"
 KLIPPER_SOURCE_PIN="${FIRMWARE_DIR}/klipper-build-source.commit"
 FIRMWARE_BUILD_ARCHIVE_ROOT="${FIRMWARE_DIR}/builds"
+MCU_UPDATE_LOCK_FILE="${FIRMWARE_DIR}/.mcu-update.lock"
+TOOLHEAD_FLASH_SNAPSHOT_ROOT="${HOME}/.cache/opennept4une"
+
+# These are process-owned scratch paths, never caller configuration. Clear any
+# exported values before traps or cleanup helpers can observe them.
+unset TOOLHEAD_FLASH_SNAPSHOT_DIR TOOLHEAD_FLASH_SNAPSHOT_FILE
 
 # Helper to apply a minimal config and expand it
 apply_minimal_config() {
@@ -27,6 +33,99 @@ apply_minimal_config() {
     rm -rf out
     cp "$config_file" .config || return 1
     make olddefconfig || return 1
+}
+
+# Klipper uses one shared .config and out/ directory for every MCU target. Hold
+# this lock for the updater's entire lifetime so concurrent invocations cannot
+# clean or replace another target's build between validation and flashing.
+acquire_mcu_update_lock() {
+    if [[ -n "${MCU_UPDATE_LOCK_FD:-}" ]]; then
+        echo "ERROR: The MCU updater lock is already held by this process." >&2
+        return 1
+    fi
+    command -v flock >/dev/null 2>&1 || {
+        echo "ERROR: flock is required to serialize MCU builds and flashes." >&2
+        return 1
+    }
+    mkdir -p "$(dirname -- "$MCU_UPDATE_LOCK_FILE")" || {
+        echo "ERROR: Could not create the MCU updater lock directory." >&2
+        return 1
+    }
+    if ! exec {MCU_UPDATE_LOCK_FD}>"$MCU_UPDATE_LOCK_FILE"; then
+        echo "ERROR: Could not open the MCU updater lock: $MCU_UPDATE_LOCK_FILE" >&2
+        unset MCU_UPDATE_LOCK_FD
+        return 1
+    fi
+    if ! flock -n "$MCU_UPDATE_LOCK_FD"; then
+        echo "ERROR: Another MCU updater is already building or flashing." >&2
+        echo "Wait for it to finish; shared Klipper build output cannot be used concurrently." >&2
+        exec {MCU_UPDATE_LOCK_FD}>&-
+        unset MCU_UPDATE_LOCK_FD
+        return 1
+    fi
+}
+
+# Used by the hardware-independent tests. Normal updater execution keeps the
+# descriptor open until process exit, including every build and flash step.
+release_mcu_update_lock() {
+    if [[ -n "${MCU_UPDATE_LOCK_FD:-}" ]]; then
+        flock -u "$MCU_UPDATE_LOCK_FD" || return 1
+        exec {MCU_UPDATE_LOCK_FD}>&-
+        unset MCU_UPDATE_LOCK_FD
+    fi
+}
+
+validate_klipper_target_config() {
+    local target="$1"
+    local config_file="$2"
+    local config_line
+    local -a required_lines=()
+    local -a forbidden_lines=()
+
+    case "$target" in
+        main-mcu)
+            required_lines=(
+                'CONFIG_MACH_STM32=y'
+                'CONFIG_MACH_STM32F4=y'
+                'CONFIG_MACH_STM32F401=y'
+                'CONFIG_SERIAL=y'
+                'CONFIG_STM32_SERIAL_USART1=y'
+            )
+            forbidden_lines=(
+                'CONFIG_MACH_STM32F103=y'
+                'CONFIG_STM32_USB_PA11_PA12=y'
+            )
+            ;;
+        usb-c-toolhead)
+            required_lines=(
+                'CONFIG_MACH_STM32=y'
+                'CONFIG_MACH_STM32F103=y'
+                'CONFIG_STM32_FLASH_START_8000=y'
+                'CONFIG_STM32_USB_PA11_PA12=y'
+            )
+            forbidden_lines=(
+                'CONFIG_MACH_STM32F401=y'
+                'CONFIG_STM32_SERIAL_USART1=y'
+            )
+            ;;
+        *)
+            echo "ERROR: Unsupported Klipper config target: $target" >&2
+            return 1
+            ;;
+    esac
+
+    for config_line in "${required_lines[@]}"; do
+        if ! grep -Fxq "$config_line" "$config_file"; then
+            echo "ERROR: ${target} build config is missing: ${config_line}" >&2
+            return 1
+        fi
+    done
+    for config_line in "${forbidden_lines[@]}"; do
+        if grep -Fxq "$config_line" "$config_file"; then
+            echo "ERROR: ${target} build config contains the incompatible setting: ${config_line}" >&2
+            return 1
+        fi
+    done
 }
 
 # Print exactly one persistent serial path. Never choose the first ttyACM node:
@@ -173,7 +272,8 @@ pin_klipper_source_commit() {
     echo "Klipper MCU build source pinned to: $current_commit"
 }
 
-# Preserve the exact inputs and output needed to reproduce or reflash a build.
+# Preserve the output and key inputs needed to identify and reflash a build.
+# This is not a byte-for-byte reproducible toolchain snapshot.
 # The timestamped directory is published only after every file and checksum has
 # been written and verified. An existing archive is never replaced, including
 # if two updater processes happen to choose the same name.
@@ -199,6 +299,7 @@ archive_klipper_firmware_build() (
         echo "ERROR: Cannot archive absent or empty expanded Klipper config: $expanded_config" >&2
         return 1
     fi
+    validate_klipper_target_config "$target" "$expanded_config" || return 1
     if [[ ! -f "$KLIPPER_SOURCE_PIN" ]]; then
         echo "ERROR: Cannot archive firmware without the pinned Klipper commit: $KLIPPER_SOURCE_PIN" >&2
         return 1
@@ -277,6 +378,10 @@ archive_klipper_firmware_build() (
         printf 'firmware_filename=klipper.bin\n'
         printf 'config_filename=klipper.config\n'
         printf 'commit_filename=klipper-source.commit\n'
+        case "$target" in
+            main-mcu) printf 'build_invocation_hint=make\n' ;;
+            usb-c-toolhead) printf 'build_invocation_hint=make MCU_UPPER=STM32F103xE -mcpu=cortex-m4\n' ;;
+        esac
     } > "${staging_dir}/build-metadata.txt"; then
         echo "ERROR: Could not write firmware build metadata." >&2
         return 1
@@ -308,10 +413,277 @@ archive_klipper_firmware_build() (
         echo "ERROR: Firmware archive was created, but its creation lock could not be removed: $archive_lock" >&2
         return 1
     }
+    if ! sync -f "$archive_dir" 2>/dev/null; then
+        sync || {
+            echo "ERROR: Firmware archive was created but could not be flushed to storage: $archive_dir" >&2
+            return 1
+        }
+    fi
     trap - EXIT INT TERM
 
-    echo "Archived ${target} firmware build: $archive_dir"
+    echo "Archived ${target} firmware build: $archive_dir" >&2
+    printf '%s\n' "$archive_dir"
 )
+
+# Validate an updater-created archive before allowing it back across a flash
+# boundary. The manifest is constrained to the exact generated files so a
+# modified manifest cannot make sha256sum inspect arbitrary paths.
+validate_firmware_build_archive() {
+    local expected_target="$1"
+    local archive_dir="$2"
+    local archive_root_real archive_real archive_commit current_commit
+    local pinned_commit metadata_commit metadata_size actual_size archive_name
+    local archive_file
+    local -a archive_files=(
+        klipper.bin
+        klipper.config
+        klipper-source.commit
+        build-metadata.txt
+        SHA256SUMS
+    )
+
+    case "$expected_target" in
+        main-mcu|usb-c-toolhead) ;;
+        *)
+            echo "ERROR: Unsupported firmware recovery target: $expected_target" >&2
+            return 1
+            ;;
+    esac
+    archive_root_real=$(readlink -f -- "$FIRMWARE_BUILD_ARCHIVE_ROOT") || {
+        echo "ERROR: Firmware archive root does not exist: $FIRMWARE_BUILD_ARCHIVE_ROOT" >&2
+        return 1
+    }
+    archive_real=$(readlink -f -- "$archive_dir") || {
+        echo "ERROR: Firmware archive does not exist: $archive_dir" >&2
+        return 1
+    }
+    case "$archive_real" in
+        "$archive_root_real"/*) ;;
+        *)
+            echo "ERROR: Recovery archive is outside the managed archive root: $archive_real" >&2
+            return 1
+            ;;
+    esac
+    if [[ ! -d "$archive_real" || -L "$archive_dir" ]]; then
+        echo "ERROR: Recovery archive is not a real directory: $archive_dir" >&2
+        return 1
+    fi
+    archive_name=$(basename -- "$archive_real")
+
+    for archive_file in "${archive_files[@]}"; do
+        if [[ ! -f "${archive_real}/${archive_file}" || -L "${archive_real}/${archive_file}" ]]; then
+            echo "ERROR: Recovery archive has an absent, non-regular, or symlinked file: $archive_file" >&2
+            return 1
+        fi
+    done
+    if ! awk '
+        function allowed(name) {
+            return name == "klipper.bin" ||
+                   name == "klipper.config" ||
+                   name == "klipper-source.commit" ||
+                   name == "build-metadata.txt"
+        }
+        NF != 2 || length($1) != 64 || $1 !~ /^[0-9a-fA-F]+$/ ||
+            !allowed($2) || seen[$2]++ { bad=1 }
+        END {
+            if (bad || !seen["klipper.bin"] || !seen["klipper.config"] ||
+                !seen["klipper-source.commit"] || !seen["build-metadata.txt"])
+                exit 1
+        }
+    ' "${archive_real}/SHA256SUMS"; then
+        echo "ERROR: Recovery archive checksum manifest has unexpected entries or format." >&2
+        return 1
+    fi
+    if ! (
+        cd "$archive_real" || exit 1
+        sha256sum --check --strict SHA256SUMS >/dev/null
+    ); then
+        echo "ERROR: Recovery archive checksum verification failed: $archive_real" >&2
+        return 1
+    fi
+
+    if [[ $(grep -Fxc "target=${expected_target}" "${archive_real}/build-metadata.txt") -ne 1 ]]; then
+        echo "ERROR: Recovery archive target is not exactly ${expected_target}." >&2
+        return 1
+    fi
+    if [[ $(grep -Fxc 'archive_schema=1' "${archive_real}/build-metadata.txt") -ne 1 ]] ||
+       [[ $(grep -Fxc 'firmware_filename=klipper.bin' "${archive_real}/build-metadata.txt") -ne 1 ]] ||
+       [[ $(grep -Fxc 'config_filename=klipper.config' "${archive_real}/build-metadata.txt") -ne 1 ]] ||
+       [[ $(grep -Fxc 'commit_filename=klipper-source.commit' "${archive_real}/build-metadata.txt") -ne 1 ]]; then
+        echo "ERROR: Recovery archive metadata schema or filenames are invalid." >&2
+        return 1
+    fi
+    archive_commit=$(tr -d '[:space:]' < "${archive_real}/klipper-source.commit") || return 1
+    [[ "$archive_commit" =~ ^[0-9a-fA-F]{40}$ ]] || {
+        echo "ERROR: Recovery archive has an invalid Klipper commit." >&2
+        return 1
+    }
+    metadata_commit=$(sed -n 's/^klipper_commit=//p' "${archive_real}/build-metadata.txt")
+    if [[ "$metadata_commit" != "$archive_commit" ]]; then
+        echo "ERROR: Recovery archive metadata and commit file disagree." >&2
+        return 1
+    fi
+    case "$archive_name" in
+        *-"${expected_target}"-"${archive_commit:0:12}") ;;
+        *)
+            echo "ERROR: Recovery archive directory name does not match its target and commit." >&2
+            return 1
+            ;;
+    esac
+
+    metadata_size=$(sed -n 's/^firmware_bytes=//p' "${archive_real}/build-metadata.txt")
+    [[ "$metadata_size" =~ ^[0-9]+$ ]] || {
+        echo "ERROR: Recovery archive has invalid firmware size metadata." >&2
+        return 1
+    }
+    actual_size=$(stat -c '%s' "${archive_real}/klipper.bin") || return 1
+    if [[ "$actual_size" != "$metadata_size" ]]; then
+        echo "ERROR: Recovery archive firmware size does not match its metadata." >&2
+        return 1
+    fi
+    validate_klipper_target_config \
+        "$expected_target" "${archive_real}/klipper.config" || return 1
+
+    current_commit=$(git -C "$KLIPPER_DIR" rev-parse --verify HEAD 2>/dev/null) || {
+        echo "ERROR: Could not resolve current Klipper commit for recovery." >&2
+        return 1
+    }
+    pinned_commit=$(tr -d '[:space:]' < "$KLIPPER_SOURCE_PIN") || return 1
+    if [[ "$archive_commit" != "$current_commit" || "$archive_commit" != "$pinned_commit" ]]; then
+        echo "ERROR: Recovery archive commit ${archive_commit} does not match both current and pinned Klipper source." >&2
+        echo "Restore the recorded Klipper revision and coordinated MCU set before using this archive." >&2
+        return 1
+    fi
+
+    printf '%s\n' "${archive_real}/klipper.bin"
+}
+
+archive_firmware_sha256() {
+    local archive_dir="$1"
+    awk '$2 == "klipper.bin" { print $1 }' "${archive_dir}/SHA256SUMS"
+}
+
+# Copy the digest-bound image into a private, random path immediately before
+# flashing. Normal second-terminal reads of the archive cannot then change the
+# bytes n4flash will open after the final validation.
+prepare_toolhead_flash_snapshot() {
+    local firmware="$1"
+    local expected_sha256="$2"
+    local snapshot_sha256
+
+    [[ "$expected_sha256" =~ ^[0-9a-fA-F]{64}$ ]] || {
+        echo "ERROR: Refusing a toolhead snapshot without a valid expected SHA-256." >&2
+        return 1
+    }
+    if [[ -n "${TOOLHEAD_FLASH_SNAPSHOT_DIR:-}" ||
+        -n "${TOOLHEAD_FLASH_SNAPSHOT_FILE:-}" ]]; then
+        echo "ERROR: A toolhead flash snapshot is already active." >&2
+        return 1
+    fi
+    mkdir -p "$TOOLHEAD_FLASH_SNAPSHOT_ROOT" || return 1
+    chmod 0700 "$TOOLHEAD_FLASH_SNAPSHOT_ROOT" || return 1
+    TOOLHEAD_FLASH_SNAPSHOT_DIR=$(mktemp -d \
+        "${TOOLHEAD_FLASH_SNAPSHOT_ROOT}/toolhead-flash.XXXXXX") || return 1
+    TOOLHEAD_FLASH_SNAPSHOT_FILE="${TOOLHEAD_FLASH_SNAPSHOT_DIR}/klipper.bin"
+    if ! install -m 0400 "$firmware" "$TOOLHEAD_FLASH_SNAPSHOT_FILE"; then
+        cleanup_toolhead_flash_snapshot
+        return 1
+    fi
+    snapshot_sha256=$(sha256sum "$TOOLHEAD_FLASH_SNAPSHOT_FILE" | awk '{print $1}') || {
+        cleanup_toolhead_flash_snapshot
+        return 1
+    }
+    if [[ "$snapshot_sha256" != "$expected_sha256" ]]; then
+        echo "ERROR: Toolhead firmware changed between validation and private snapshot creation." >&2
+        cleanup_toolhead_flash_snapshot
+        return 1
+    fi
+    if ! sync -f "$TOOLHEAD_FLASH_SNAPSHOT_FILE" 2>/dev/null; then
+        sync || {
+            echo "ERROR: Could not flush the private toolhead flash snapshot." >&2
+            cleanup_toolhead_flash_snapshot
+            return 1
+        }
+    fi
+}
+
+cleanup_toolhead_flash_snapshot() {
+    local snapshot_dir="${TOOLHEAD_FLASH_SNAPSHOT_DIR:-}"
+    local snapshot_file="${TOOLHEAD_FLASH_SNAPSHOT_FILE:-}"
+    local snapshot_root_real snapshot_dir_real snapshot_parent_real
+
+    if [[ -z "$snapshot_dir" ]]; then
+        if [[ -n "$snapshot_file" ]]; then
+            echo "ERROR: Refusing to clean a toolhead snapshot file without its directory." >&2
+            return 1
+        fi
+        return 0
+    fi
+    case "$snapshot_dir" in
+        "${TOOLHEAD_FLASH_SNAPSHOT_ROOT}"/toolhead-flash.*) ;;
+        *)
+            echo "ERROR: Refusing to clean an unexpected toolhead snapshot path: $snapshot_dir" >&2
+            return 1
+            ;;
+    esac
+    if [[ "$snapshot_file" != "${snapshot_dir}/klipper.bin" ]]; then
+        echo "ERROR: Refusing to clean an unexpected toolhead snapshot file: $snapshot_file" >&2
+        return 1
+    fi
+    if [[ ! -d "$snapshot_dir" || -L "$snapshot_dir" ]]; then
+        echo "ERROR: Refusing to clean a missing or linked toolhead snapshot directory: $snapshot_dir" >&2
+        return 1
+    fi
+    snapshot_root_real=$(realpath -e -- "$TOOLHEAD_FLASH_SNAPSHOT_ROOT") || return 1
+    snapshot_dir_real=$(realpath -e -- "$snapshot_dir") || return 1
+    snapshot_parent_real=$(dirname -- "$snapshot_dir_real") || return 1
+    if [[ "$snapshot_parent_real" != "$snapshot_root_real" ||
+        "$snapshot_dir_real" != "$snapshot_root_real"/toolhead-flash.* ]]; then
+        echo "ERROR: Refusing to clean a snapshot outside the canonical snapshot root: $snapshot_dir" >&2
+        return 1
+    fi
+    if [[ -e "$snapshot_file" || -L "$snapshot_file" ]]; then
+        if [[ ! -f "$snapshot_file" || -L "$snapshot_file" ]]; then
+            echo "ERROR: Refusing to remove an unexpected toolhead snapshot file type: $snapshot_file" >&2
+            return 1
+        fi
+        rm -f -- "$snapshot_file" || return 1
+    fi
+    rmdir -- "$snapshot_dir" || return 1
+    unset TOOLHEAD_FLASH_SNAPSHOT_FILE TOOLHEAD_FLASH_SNAPSHOT_DIR
+}
+
+select_usb_toolhead_recovery_archive() {
+    local archive_dir selected
+    local -a archives=()
+
+    unset SELECTED_USB_TOOLHEAD_RECOVERY_ARCHIVE
+    shopt -s nullglob
+    for archive_dir in "${FIRMWARE_BUILD_ARCHIVE_ROOT}"/*-usb-c-toolhead-*; do
+        [[ -d "$archive_dir" && ! -L "$archive_dir" && -f "$archive_dir/SHA256SUMS" ]] &&
+            archives+=("$archive_dir")
+    done
+    shopt -u nullglob
+    if [[ ${#archives[@]} -eq 0 ]]; then
+        echo "ERROR: No USB-C toolhead recovery archives exist under ${FIRMWARE_BUILD_ARCHIVE_ROOT}." >&2
+        return 1
+    fi
+
+    echo "Choose the exact USB-C toolhead build archive to verify and flash:"
+    select selected in "${archives[@]}" "Cancel"; do
+        if [[ "$selected" == "Cancel" ]]; then
+            echo "USB-C toolhead recovery canceled."
+            return 2
+        fi
+        if [[ -n "$selected" ]]; then
+            SELECTED_USB_TOOLHEAD_RECOVERY_ARCHIVE="$selected"
+            return 0
+        fi
+        echo "Invalid selection."
+    done
+    echo "USB-C toolhead recovery canceled without a selection."
+    return 2
+}
 
 validate_usb_toolhead_bootloader() {
     local device="$1"
@@ -565,6 +937,8 @@ if [[ "${OPENNEPT4UNE_RPI_MCU_INSTALL_LIB_ONLY:-0}" == "1" ]]; then
     return 0 2>/dev/null || exit 0
 fi
 
+acquire_mcu_update_lock || exit 1
+
 # Get current git branch from $KLIPPER_DIR
 cd "$KLIPPER_DIR" || exit 1
 current_branch=$(git rev-parse --abbrev-ref HEAD)
@@ -580,10 +954,11 @@ if [[ -z $1 ]]; then
     echo ""
     echo "Choose one MCU to update:"
     echo ""
-    select mcu_choice in "STM32" "USB-C Toolhead" "Virtual RPi" "Pico-based USB Accelerometer" "Cancel"; do
+    select mcu_choice in "STM32" "USB-C Toolhead" "USB-C Toolhead Recovery" "Virtual RPi" "Pico-based USB Accelerometer" "Cancel"; do
         case $mcu_choice in
             STM32 ) break;;
             USB-C\ Toolhead ) break;;
+            USB-C\ Toolhead\ Recovery ) break;;
             Virtual\ RPi ) break;;
             Pico-based\ USB\ Accelerometer ) break;;
             Cancel ) echo "Update canceled."; exit;;
@@ -594,7 +969,7 @@ else
 fi
 
 case "$mcu_choice" in
-    STM32|USB-C\ Toolhead|Virtual\ RPi|Pico-based\ USB\ Accelerometer) ;;
+    STM32|USB-C\ Toolhead|USB-C\ Toolhead\ Recovery|Virtual\ RPi|Pico-based\ USB\ Accelerometer) ;;
     All)
         echo "ERROR: The mixed 'All' firmware update is disabled for safety."
         echo "Update exactly one target per run so each MCU can reconnect and be verified."
@@ -614,6 +989,8 @@ cd "$KLIPPER_DIR" || exit 1
 
 ### STM32 MCU UPDATE ###
 if [[ "$mcu_choice" == "STM32" ]]; then
+    main_archive_dir=""
+    main_firmware=""
     clear
     echo "Proceeding with STM32 MCU Update..."
     echo "Main-controller serial flashing is intentionally not offered here."
@@ -627,13 +1004,15 @@ if [[ "$mcu_choice" == "STM32" ]]; then
         echo "Failed to build main MCU firmware."
         exit 1
     }
-    archive_klipper_firmware_build \
+    main_archive_dir=$(archive_klipper_firmware_build \
         "main-mcu" \
         "${KLIPPER_DIR}/out/klipper.bin" \
-        "${KLIPPER_DIR}/.config" || {
+        "${KLIPPER_DIR}/.config") || {
         echo "ERROR: Main-MCU build archival failed; refusing to stage or flash firmware."
         exit 1
     }
+    main_firmware=$(validate_firmware_build_archive \
+        "main-mcu" "$main_archive_dir") || exit 1
 
     if grep -q "/usr/local/bin/gpio_set.sh" "/etc/rc.local" 2>/dev/null; then
         echo "Detected MCU running the Alternative method! Running headless flash..."
@@ -652,16 +1031,17 @@ if [[ "$mcu_choice" == "STM32" ]]; then
             echo "Failed to remove stale main-MCU firmware files."
             exit 1
         }
-        cp "$KLIPPER_DIR/out/klipper.bin" "$FIRMWARE_DIR/X_4.bin" || {
+        cp "$main_firmware" "$FIRMWARE_DIR/X_4.bin" || {
             echo "Failed to stage X_4.bin."
             exit 1
         }
-        cp "$KLIPPER_DIR/out/klipper.bin" "$FIRMWARE_DIR/elegoo_k1.bin" || {
+        cp "$main_firmware" "$FIRMWARE_DIR/elegoo_k1.bin" || {
             echo "Failed to stage elegoo_k1.bin."
             exit 1
         }
 
         clear
+        echo "Verified main-MCU build archive: $main_archive_dir"
         ip_address=$(hostname -I | awk '{print $1}')
         echo ""
         echo -e "\nTo download firmware files:"
@@ -689,39 +1069,68 @@ if [[ "$mcu_choice" == "STM32" ]]; then
 fi
 
 ### USB-C TOOLHEAD MCU ###
-if [[ "$mcu_choice" == "USB-C Toolhead" ]]; then
-    toolhead_firmware="${KLIPPER_DIR}/out/klipper.bin"
+if [[ "$mcu_choice" == "USB-C Toolhead" || "$mcu_choice" == "USB-C Toolhead Recovery" ]]; then
+    toolhead_firmware=""
     toolhead_device=""
     bootloader_device=""
     boot_method=""
     resolve_exit=0
     klipper_was_active=false
     klipper_state=""
+    toolhead_archive_dir=""
+    toolhead_expected_sha256=""
 
     clear
-    echo "Proceeding with USB-C Toolhead MCU Update..."
+    if [[ "$mcu_choice" == "USB-C Toolhead Recovery" ]]; then
+        echo "Proceeding with guarded USB-C Toolhead MCU Recovery..."
+    else
+        echo "Proceeding with USB-C Toolhead MCU Update..."
+    fi
     echo "This updater is for the separate USB-C toolhead MCU, not the STM32 main controller."
     echo ""
 
-    echo "Building USB-C toolhead firmware..."
-    apply_minimal_config "$USB_TOOLHEAD_CONFIG" || {
-        echo "Failed to configure USB-C toolhead firmware."
-        exit 1
-    }
-    # The GD32F303-compatible controller needs Cortex-M4 instructions while
-    # retaining Klipper's STM32F103xE firmware layout.
-    make 'MCU_UPPER=STM32F103xE -mcpu=cortex-m4' || {
-        echo "Failed to build USB-C toolhead firmware."
+    if [[ "$mcu_choice" == "USB-C Toolhead Recovery" ]]; then
+        select_usb_toolhead_recovery_archive
+        recovery_selection_exit=$?
+        case "$recovery_selection_exit" in
+            0) ;;
+            2) exit 0 ;;
+            *) exit 1 ;;
+        esac
+        toolhead_archive_dir="$SELECTED_USB_TOOLHEAD_RECOVERY_ARCHIVE"
+        toolhead_firmware=$(validate_firmware_build_archive \
+            "usb-c-toolhead" "$toolhead_archive_dir") || exit 1
+        echo "Verified archived USB-C toolhead firmware: $toolhead_firmware"
+    else
+        toolhead_firmware="${KLIPPER_DIR}/out/klipper.bin"
+        echo "Building USB-C toolhead firmware..."
+        apply_minimal_config "$USB_TOOLHEAD_CONFIG" || {
+            echo "Failed to configure USB-C toolhead firmware."
+            exit 1
+        }
+        # The GD32F303-compatible controller needs Cortex-M4 instructions while
+        # retaining Klipper's STM32F103xE firmware layout.
+        make 'MCU_UPPER=STM32F103xE -mcpu=cortex-m4' || {
+            echo "Failed to build USB-C toolhead firmware."
+            exit 1
+        }
+        validate_usb_toolhead_firmware "$toolhead_firmware" || exit 1
+        toolhead_archive_dir=$(archive_klipper_firmware_build \
+            "usb-c-toolhead" \
+            "$toolhead_firmware" \
+            "${KLIPPER_DIR}/.config") || {
+            echo "ERROR: USB-C toolhead build archival failed; refusing to flash firmware."
+            exit 1
+        }
+        toolhead_firmware=$(validate_firmware_build_archive \
+            "usb-c-toolhead" "$toolhead_archive_dir") || exit 1
+    fi
+    toolhead_expected_sha256=$(archive_firmware_sha256 "$toolhead_archive_dir" | tr 'A-F' 'a-f') || exit 1
+    [[ "$toolhead_expected_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+        echo "ERROR: Could not bind the archived toolhead firmware SHA-256." >&2
         exit 1
     }
     validate_usb_toolhead_firmware "$toolhead_firmware" || exit 1
-    archive_klipper_firmware_build \
-        "usb-c-toolhead" \
-        "$toolhead_firmware" \
-        "${KLIPPER_DIR}/.config" || {
-        echo "ERROR: USB-C toolhead build archival failed; refusing to flash firmware."
-        exit 1
-    }
     ensure_n4flash || exit 1
 
     echo ""
@@ -801,6 +1210,11 @@ if [[ "$mcu_choice" == "USB-C Toolhead" ]]; then
 
     restore_klipper_service() {
         local require_success="${1:-false}"
+        local cleanup_failed=false
+        if ! cleanup_toolhead_flash_snapshot; then
+            echo "ERROR: Could not clean the private toolhead flash snapshot." >&2
+            cleanup_failed=true
+        fi
         if [[ "$klipper_was_active" == true ]]; then
             if ! sudo service klipper start; then
                 echo "ERROR: Could not restore the Klipper service." >&2
@@ -808,6 +1222,9 @@ if [[ "$mcu_choice" == "USB-C Toolhead" ]]; then
                 return 0
             fi
             klipper_was_active=false
+        fi
+        if [[ "$cleanup_failed" = true && "$require_success" = true ]]; then
+            return 1
         fi
     }
     trap restore_klipper_service EXIT
@@ -846,10 +1263,27 @@ if [[ "$mcu_choice" == "USB-C Toolhead" ]]; then
     fi
     validate_usb_toolhead_bootloader "$bootloader_device" || exit 1
 
+    # Revalidate the managed archive after the human confirmation/device
+    # selection interval, bind it to the digest captured earlier, and flash a
+    # private snapshot rather than the user-readable archive path.
+    toolhead_firmware=$(validate_firmware_build_archive \
+        "usb-c-toolhead" "$toolhead_archive_dir") || exit 1
+    final_toolhead_sha256=$(sha256sum "$toolhead_firmware" | awk '{print $1}') || exit 1
+    if [[ "$final_toolhead_sha256" != "$toolhead_expected_sha256" ]]; then
+        echo "ERROR: The selected toolhead archive changed after initial validation; refusing to flash." >&2
+        exit 1
+    fi
+    prepare_toolhead_flash_snapshot \
+        "$toolhead_firmware" "$toolhead_expected_sha256" || exit 1
+
     echo "Flashing USB-C toolhead through $bootloader_device..."
-    if ! "$N4FLASH_BIN" "$toolhead_firmware" "$bootloader_device"; then
+    if ! "$N4FLASH_BIN" "$TOOLHEAD_FLASH_SNAPSHOT_FILE" "$bootloader_device"; then
         echo "ERROR: USB-C toolhead flashing failed. Its application may now be erased."
         echo "Keep the printer powered and rerun this updater; the bootloader should remain available."
+        exit 1
+    fi
+    if ! cleanup_toolhead_flash_snapshot; then
+        echo "ERROR: Firmware transferred, but the private flash snapshot could not be removed." >&2
         exit 1
     fi
 
