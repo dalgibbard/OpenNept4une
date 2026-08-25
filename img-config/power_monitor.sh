@@ -141,13 +141,11 @@ start_monitors() {
     gpiomon -c "$CHIP" --edges=falling -n 1 "$LINE_PWRGOOD" &
     local pid2=$!
     MON_PIDS+=("$pid2")
-    
-    # Verify monitors started
-    sleep 0.1
-    if ! kill -0 "$pid1" 2>/dev/null || ! kill -0 "$pid2" 2>/dev/null; then
-      die "Failed to start v2 monitors"
-    fi
-    
+
+    # Do not test these PIDs with kill -0 here. With -n 1, a valid edge may
+    # make gpiomon exit successfully before a liveness check can run. The
+    # following wait collects that status and the debounce logic decides
+    # whether the edge represents a real loss or a startup glitch.
     log "Monitors started: PWRLOSS(${LINE_PWRLOSS}↑ pid=$pid1) PWRGOOD(${LINE_PWRGOOD}↓ pid=$pid2)"
   else
     # v1: classic syntax (like your working script)

@@ -46,7 +46,10 @@ printf '%s\n' \
   '    echo 1 > "$count_file"' \
   '    ;;' \
   '  gpiomon)' \
-  '    /bin/sleep 0.15' \
+  '    case " $* " in' \
+  '      *" 10 ") ;;' \
+  '      *) /bin/sleep 0.15 ;;' \
+  '    esac' \
   '    echo "test edge"' \
   '    ;;' \
   '  pgrep)' \
