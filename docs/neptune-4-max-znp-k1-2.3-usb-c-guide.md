@@ -1300,29 +1300,6 @@ grep -n 'THR:PB10\|neopixel toolhead_led' \
 sudo ~/OpenNept4une/img-config/board-hardware-setup.sh status
 ```
 
-Verify that neither Max X/Y TMC section forces StealthChop:
-
-```bash
-sed -n '/^\[tmc2209 stepper_x\]/,/^\[/p' \
-  ~/printer_data/config/printer.cfg
-sed -n '/^\[tmc2209 stepper_y\]/,/^\[/p' \
-  ~/printer_data/config/printer.cfg
-```
-
-There must be no `stealthchop_threshold` in either section. With the setting
-omitted, Klipper uses SpreadCycle. The older generated Max configuration set
-`stealthchop_threshold: 999999`, forcing StealthChop at all speeds; this has
-been associated with lost X/Y position and physical crashes on the Max's
-high-inertia axes in upstream issue
-[#440](https://github.com/OpenNeptune3D/OpenNept4une/issues/440). Do not run
-homing or motion tests with that older Max configuration. Pull this fix and
-rerun the Section 8 `install_printer_cfg` command first.
-
-Klipper automatically selects the appropriate driver mode while performing
-sensorless homing, so this change primarily protects normal and high-speed
-motion. It is not a substitute for checking direction, StallGuard sensitivity,
-motor current, or safe homing behavior one axis at a time.
-
 ### Install the remaining fresh-image configuration set
 
 This is a required fresh-install step and is separate from generating
