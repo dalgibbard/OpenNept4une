@@ -34,6 +34,9 @@ raw backup of the original eMMC before testing it.
   libgpiod v2 it uses the physically validated quiet both-edge request mode
   with 20 ms kernel debounce, releases both one-shot monitors before live-state
   verification, and re-arms only those input monitors after a rejected event.
+- A cold-boot checker validates the GPIO82 service/state, application USB ID,
+  and persistent serial identity, then records each explicitly confirmed Linux
+  boot ID at most once toward the ten-boot hardware-validation target.
   Image cleanup now leaves an empty
   `/etc/machine-id` placeholder suitable for first-boot initialization.
 - Printer model/PCB/toolhead selection validates only supported tuples and is

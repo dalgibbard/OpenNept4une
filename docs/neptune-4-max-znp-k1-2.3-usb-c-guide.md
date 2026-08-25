@@ -812,16 +812,24 @@ sudo reboot
 
 After reboot, `status` must report output direction and value `1`, the service must be active, and the selected DTB must be the v2.3 file. The toolhead may appear as its application, its bootloader, or not yet have a known by-id name if its factory firmware differs.
 
-Do ten cold-boot checks before considering this hardware path validated:
+Do ten cold-boot checks before considering this hardware path validated. The
+checker verifies the four conditions above and counts each Linux boot ID at
+most once. Software cannot tell a warm reboot from actual power removal, so
+pass `--record-cold-boot` only after removing mains power completely and then
+starting the printer:
 
 ```bash
-systemctl is-active opennept4une-toolhead-power.service
-sudo /usr/local/sbin/opennept4une-toolhead-power status
-lsusb
-ls -l /dev/serial/by-id/ 2>/dev/null
+~/OpenNept4une/img-config/check-toolhead-cold-boot.sh \
+  --record-cold-boot
 ```
 
-Record any failure and stop rather than guessing another GPIO. The sysfs GPIO API is deprecated on newer Linux systems, but it is the interface exposed by the current v0.1.7 image.
+Running the script without that option validates the current state without
+incrementing the count. It pins the first recorded persistent serial identity,
+rejects a later identity change, and stores hashed boot IDs plus timestamps in
+`~/.local/state/opennept4une/toolhead-cold-boots.tsv`. Record any failure and
+stop rather than guessing another GPIO. The sysfs GPIO API is deprecated on
+newer Linux systems, but it is the interface exposed by the current v0.1.7
+image.
 
 ## 6. Put this fork on the printer
 
