@@ -85,6 +85,22 @@ class GenerateConfigTests(unittest.TestCase):
         self.assertNotIn('THR:PB10', output)
         self.assertFalse((self.config_dir / 'MCU_ID.cfg').exists())
 
+    def test_n4max_uses_spreadcycle_for_high_inertia_xy_axes(self):
+        result = self.run_generator('n4max', '--toolhead', 'ribbon')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        output = (self.confs / 'output.cfg').read_text()
+        self.assertNotIn('stealthchop_threshold:', output)
+        self.assertNotIn('x_driver_mode', output)
+        self.assertNotIn('y_driver_mode', output)
+
+    def test_n4_keeps_existing_stealthchop_xy_configuration(self):
+        result = self.run_generator('n4', '--toolhead', 'ribbon')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+        output = (self.confs / 'output.cfg').read_text()
+        self.assertEqual(output.count('stealthchop_threshold: 999999'), 2)
+
     def test_usb_c_requires_exactly_one_persistent_serial(self):
         no_device = self.run_generator('n4max', '--toolhead', 'usb-c')
         self.assertNotEqual(no_device.returncode, 0)
