@@ -32,7 +32,9 @@ raw backup of the original eMMC before testing it.
 - The power-loss monitor keeps one supercapacitor GPIO holder across rejected
   false edges and keeps both edge-monitor requests open, avoiding the observed
   `Device or resource busy` failure and a GPIO10 synthetic-edge restart loop.
-  It debounces an event without releasing and re-requesting either input line.
+  It debounces an event without releasing and re-requesting either input line,
+  coalesces the observed millisecond-scale startup burst, and rechecks the live
+  levels after draining the queue.
   Image cleanup now leaves an empty
   `/etc/machine-id` placeholder suitable for first-boot initialization.
 - Printer model/PCB/toolhead selection validates only supported tuples and is

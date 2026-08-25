@@ -187,6 +187,24 @@ wait_any_event() {
   done
 }
 
+drain_queued_events() {
+  local event count=0
+
+  # GPIO10 can emit a short burst when its request is first established. Once
+  # live sampling has proved the pins stable, coalesce the rest of that stale
+  # burst instead of running the full debounce window for every queued line.
+  while [ "$count" -lt 4096 ] && IFS= read -r -t 0.01 -u "$EVENT_FD" event; do
+    count=$((count + 1))
+  done
+
+  if [ "$count" -gt 0 ]; then
+    log "Discarded ${count} queued edge event(s) after stable-state verification"
+  fi
+  if [ "$count" -eq 4096 ]; then
+    log "WARNING: Edge queue drain limit reached; input may still be noisy"
+  fi
+}
+
 # ===== Verify event (simple debounce/confirm) =====
 verify_loss() {
   local ok=0 cnt=0
@@ -242,6 +260,20 @@ while true; do
   if verify_loss; then
     handle_power_cut
     break
+  fi
+
+  drain_queued_events
+
+  # Close the race between the last debounce sample and draining stale events.
+  # If a real loss began in that window, the live levels remain asserted and
+  # must be confirmed even though its edge notification was coalesced.
+  read -r pl pg < <(read_states)
+  if [ "$pl" = "1" ] || [ "$pg" = "0" ]; then
+    log "Loss state present after queue drain; re-verifying."
+    if verify_loss; then
+      handle_power_cut
+      break
+    fi
   fi
 
   log "Glitch detected and ignored. Monitors remain armed."

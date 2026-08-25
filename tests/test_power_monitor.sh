@@ -31,7 +31,7 @@ printf '%s\n' \
   '    test ! -f "$count_file" || count=$(cat "$count_file")' \
   '    count=$((count + 1))' \
   '    echo "$count" > "$count_file"' \
-  '    if test "$count" -le 6; then' \
+  '    if test "$count" -le 7; then' \
   '      echo "\"10\"=inactive \"19\"=active"' \
   '    else' \
   '      echo "\"10\"=active \"19\"=active"' \
@@ -48,7 +48,11 @@ printf '%s\n' \
   '  gpiomon)' \
   '    case " $* " in' \
   '      *" 10 ")' \
-  '        echo "synthetic startup edge"' \
+  '        i=0' \
+  '        while test "$i" -lt 25; do' \
+  '          echo "synthetic startup edge $i"' \
+  '          i=$((i + 1))' \
+  '        done' \
   '        /bin/sleep 1' \
   '        echo "real loss edge"' \
   '        /bin/sleep 30' \
@@ -86,6 +90,8 @@ fi
 test "$(<"${TEST_ROOT}/state/gpioset-count")" = 1
 test "$(grep -c 'Monitors started:' "${TEST_ROOT}/power-monitor.output")" = 1
 grep -Fq 'Verification: 0/5 samples confirmed loss' \
+  "${TEST_ROOT}/power-monitor.output"
+grep -Fq 'Discarded 24 queued edge event(s) after stable-state verification' \
   "${TEST_ROOT}/power-monitor.output"
 grep -Fq 'Glitch detected and ignored. Monitors remain armed.' \
   "${TEST_ROOT}/power-monitor.output"
