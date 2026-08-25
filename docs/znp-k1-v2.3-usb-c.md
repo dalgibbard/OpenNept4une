@@ -24,6 +24,13 @@ raw backup of the original eMMC before testing it.
   images, is idempotent, and records state for guarded rollback. Mutations
   require root, install root-owned service artifacts, and preflight every
   managed guard before changing either the DTB or power integration.
+- The v2.3 DTB corrects the RK805 PMIC interrupt to GPIO2 line 6, matching its
+  pinctrl and maintained MKS Pi source. Physical testing showed the inherited
+  line-24 value storming until Linux disabled the PMIC IRQ.
+- The power-loss monitor keeps one supercapacitor GPIO holder across rejected
+  false edges and restarts only its edge monitors, avoiding the observed
+  `Device or resource busy` failure. Image cleanup now leaves an empty
+  `/etc/machine-id` placeholder suitable for first-boot initialization.
 - Printer model/PCB/toolhead selection validates only supported tuples and is
   written with an atomic, exactly-one-line replacement. Explicit CLI fields
   are retained even when the command is otherwise interactive.
@@ -115,7 +122,10 @@ query that explicit node with `udevadm info`. Do not guess `/dev/ttyACM0`.
 Record and confirm all of the following before treating auto-detection or
 flashing as production-safe:
 
-- TODO: application-mode `/dev/serial/by-id` name, VID:PID, and physical path;
+- observed application mode: VID:PID `1d50:614e` and
+  `/dev/serial/by-id/usb-Klipper_stm32f103xe_105B303534340C0039333032-if00`;
+- TODO: confirm the application physical path with udev and collect additional
+  device samples rather than treating the observed serial as universal;
 - TODO: bootloader-mode `/dev/serial/by-id` name, VID:PID, and physical path;
 - TODO: whether the node changes when the C920 or a USB hub is attached;
 - TODO: GPIO82 power-cycle timing over at least ten cold boots;

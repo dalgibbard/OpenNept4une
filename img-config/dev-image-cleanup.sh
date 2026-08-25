@@ -138,9 +138,14 @@ $SUDO rm -f /var/lib/systemd/resolved/* 2>/dev/null || true
 # ------------------------------------
 # 4) Regenerate-unique identity on boot
 # ------------------------------------
-echo "-- Removing machine identity and SSH host keys --"
+echo "-- Resetting machine identity and SSH host keys --"
 
-$SUDO rm -f /etc/machine-id /var/lib/dbus/machine-id || true
+# An empty file lets systemd install a transient ID while the root filesystem
+# is still read-only, then commit it after the filesystem becomes writable.
+# Removing the file entirely makes early boot fail to establish that fallback.
+$SUDO rm -f /var/lib/dbus/machine-id || true
+$SUDO install -o root -g root -m 0444 /dev/null /etc/machine-id
+$SUDO ln -s /etc/machine-id /var/lib/dbus/machine-id
 
 $SUDO rm -f /etc/ssh/ssh_host_* || true
 $SUDO ssh-keygen -A

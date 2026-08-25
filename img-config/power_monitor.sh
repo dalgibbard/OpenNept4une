@@ -4,7 +4,14 @@
 set -euo pipefail
 
 # ===== Configuration =====
-DEBUG="${DEBUG:-false}"
+DEBUG="${OPENNEPT4UNE_POWER_MONITOR_DEBUG:-false}"
+case "$DEBUG" in
+  true|false) ;;
+  *)
+    echo "power_monitor: OPENNEPT4UNE_POWER_MONITOR_DEBUG must be true or false" >&2
+    exit 2
+    ;;
+esac
 CHIP="${CHIP:-gpiochip1}"
 LINE_SUPERCAP="${LINE_SUPERCAP:-21}"
 LINE_PWRLOSS="${LINE_PWRLOSS:-10}"   # rising = loss
@@ -41,11 +48,19 @@ fi
 MON_PIDS=()
 SUPERCAP_PID=""
 
-cleanup() {
-  # Kill monitors on exit
-  for p in "${MON_PIDS[@]:-}"; do 
+stop_monitors() {
+  local p
+  for p in "${MON_PIDS[@]}"; do
     kill "$p" >/dev/null 2>&1 || true
   done
+  for p in "${MON_PIDS[@]}"; do
+    wait "$p" >/dev/null 2>&1 || true
+  done
+  MON_PIDS=()
+}
+
+cleanup() {
+  stop_monitors
   # Kill supercap holder if it exists
   if [ -n "${SUPERCAP_PID}" ] && kill -0 "$SUPERCAP_PID" >/dev/null 2>&1; then
     kill "$SUPERCAP_PID" >/dev/null 2>&1 || true
@@ -179,11 +194,10 @@ handle_power_cut() {
   log "Power loss verified. Initiating safe shutdown..."
   if $DEBUG; then
     log "[DEBUG] Would execute: systemctl poweroff"
-  else
-    systemctl poweroff
+    return 0
   fi
+  systemctl poweroff
   # Don't exit in real mode - let systemd handle it
-  $DEBUG && exit 0
 }
 
 # ===== Main =====
@@ -201,15 +215,18 @@ else
   log "WARNING: Unexpected initial state (PWRLOSS=${pl}, PWRGOOD=${pg}). Continuing anyway."
 fi
 
-# Start monitors once and wait (like your working script)
-start_monitors
-wait_any_event
+# Keep the supercapacitor line held by the one gpioset process above. A false
+# edge restarts only the two input monitors; re-executing this script would
+# orphan the daemonized holder and make the next gpioset fail with EBUSY.
+while true; do
+  start_monitors
+  wait_any_event || die "A GPIO edge monitor exited unsuccessfully"
 
-# An event occurred - verify it
-if verify_loss; then
-  handle_power_cut
-else
+  if verify_loss; then
+    handle_power_cut
+    break
+  fi
+
   log "Glitch detected and ignored. Restarting monitors."
-  # Only loop if it was a false alarm
-  exec "$0" "$@"
-fi
+  stop_monitors
+done

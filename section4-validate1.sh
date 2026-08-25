@@ -9,7 +9,11 @@
 
   echo '=== machine-id ==='
   ls -l /etc/machine-id /var/lib/dbus/machine-id 2>&1
-  cat /etc/machine-id 2>&1
+  if grep -Eq '^[0-9a-f]{32}$' /etc/machine-id 2>/dev/null; then
+    echo 'machine-id: valid (value intentionally not logged)'
+  else
+    echo 'machine-id: MISSING OR INVALID'
+  fi
 
   echo '=== power monitor ==='
   systemctl status power_monitor.service --no-pager -l
@@ -21,8 +25,13 @@
     grep -Ei 'irq 34|nobody cared|rk805|pmic|regmap'
 
   echo '=== relevant GPIO ownership ==='
-  gpioinfo gpiochip1 2>&1
-  gpioinfo gpiochip2 2>&1
+  if gpioinfo --help 2>&1 | grep -q -- '-c, --chip'; then
+    gpioinfo -c gpiochip1 2>&1
+    gpioinfo -c gpiochip2 2>&1
+  else
+    gpioinfo gpiochip1 2>&1
+    gpioinfo gpiochip2 2>&1
+  fi
 
   echo '=== toolhead power ==='
   systemctl status opennept4une-toolhead-power.service --no-pager -l

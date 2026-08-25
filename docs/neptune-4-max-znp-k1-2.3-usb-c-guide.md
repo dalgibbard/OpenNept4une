@@ -519,7 +519,7 @@ grep '^fdtfile=' /mnt/n4boot/armbianEnv.txt
 Both hashes must be:
 
 ```text
-c966b74ced89e007972ab2af45c33bbcb1c12cc27d515eda8b8a48713926e0d8
+808c234c5cedb0e5f70d87fc7973d9e2693a7e38563c5ad62c99417b7d22c92b
 ```
 
 The expected selection is:
@@ -528,7 +528,14 @@ The expected selection is:
 fdtfile=rockchip/rk3328-znp-n4plus-n4max-v2.3.dtb
 ```
 
-The included 2.3 DTS differs from the 2.0 DTS mainly in Ethernet timing and video/IOMMU status. Its USB and UART nodes are unchanged, so the board-specific DTB and GPIO82 toolhead-power service are both required.
+The included 2.3 DTS differs from the 2.0 DTS in Ethernet timing,
+video/IOMMU status, and the RK805 PMIC interrupt. Physical validation found
+the inherited GPIO2 line-24 declaration producing 100,001 unhandled
+interrupts before Linux disabled the RK805 IRQ. The corrected declaration uses
+GPIO2 line 6 (`RK_PA6`), matching both its pinctrl entry and the maintained
+[Armbian MKS Pi DTS](https://github.com/armbian/build/blob/e65ba52e3d99004c7dd4e39665e5f9c08516a30a/patch/kernel/archive/rockchip64-6.12/dt/rk3328-mkspi.dts).
+Its USB and UART nodes are unchanged, so the board-specific DTB and GPIO82
+toolhead-power service are both required.
 
 ### Optional: preconfigure Wi-Fi
 
@@ -637,6 +644,23 @@ diff and commit/push the intended integration before enabling automatic
 updates. If you skip this preload, section 6 explains deployment after first
 boot.
 
+### Prepare first-boot machine identity
+
+The v0.1.7 image may have `/etc/machine-id` absent rather than empty. Leave an
+empty root-owned placeholder so systemd can establish a transient identity
+while the root filesystem is initially read-only and commit it after the
+filesystem becomes writable:
+
+```bash
+sudo install -o root -g root -m 0444 /dev/null \
+  /mnt/n4root/etc/machine-id
+sudo ln -sfn /etc/machine-id \
+  /mnt/n4root/var/lib/dbus/machine-id
+```
+
+Do not generate one reusable ID in an image that will be cloned to multiple
+printers. Each machine must acquire its own identity.
+
 ### Finish the offline work
 
 ```bash
@@ -669,6 +693,22 @@ The image's initial password is `makerbase`. Change it immediately:
 passwd
 ```
 
+Verify that first boot persisted a valid machine identity without printing it
+into a log. If the check fails, initialize it now while the root filesystem is
+writable; this is the repair path for an already-booted v0.1.7 image:
+
+```bash
+if ! sudo grep -Eq '^[0-9a-f]{32}$' /etc/machine-id; then
+  sudo systemd-machine-id-setup
+fi
+sudo grep -Eq '^[0-9a-f]{32}$' /etc/machine-id
+test "$(readlink /var/lib/dbus/machine-id)" = /etc/machine-id
+```
+
+The machine ID is host-confidential. Do not print it into a support log or
+commit it to this repository. If it had to be repaired, include that change in
+the planned DTB reboot below before evaluating service timestamps or status.
+
 The release image already contains display, affinity, and `mjpg-streamer` services. Disable only the camera during base bring-up. Keep the release's `display.service` and `affinity.service` together: v0.1.7 couples those units, and affinity pins Klipper, `klipper-mcu`, and serial IRQ work as a latency safeguard. Disabling display and then starting affinity merely pulls display back in, so treat the stock screen pair as part of the base baseline. Capture both definitions and verify them:
 
 ```bash
@@ -693,11 +733,56 @@ nmcli device status
 journalctl -b -p warning --no-pager
 ```
 
-The selected path must be `rockchip/rk3328-znp-n4plus-n4max-v2.3.dtb`, and its hash must still be `c966b74c...e0d8`. Verify both Ethernet and Wi-Fi if possible; the board-2.3 DTB changes Ethernet timing.
+The selected path must be
+`rockchip/rk3328-znp-n4plus-n4max-v2.3.dtb`, and its hash must still be
+`808c234c...c92b`. Verify both Ethernet and Wi-Fi if possible; the board-2.3
+DTB changes Ethernet timing. Also confirm the RK805 interrupt is present but
+not storming or disabled:
+
+```bash
+grep -E 'rk805|Err:' /proc/interrupts
+journalctl -k -b --no-pager | \
+  grep -Ei 'irq [0-9]+: nobody cared|disabling IRQ|rk805'
+systemctl status power_monitor.service --no-pager
+```
+
+An RK805 parent line accumulating roughly 100,000 interrupts followed by
+`nobody cared` or `Disabling IRQ` is a hard stop. Do not use the kernel's
+`irqpoll` suggestion as a workaround and do not flash an MCU.
+
+If the DTB still has the former `c966b74c...e0d8` hash, update this fork's
+checkout, ensure it is clean, and reconcile the corrected integration before
+continuing:
+
+```bash
+cd ~/OpenNept4une
+git status --short --branch
+git pull --ff-only origin dev
+sudo ./img-config/board-hardware-setup.sh apply \
+  --model n4max \
+  --pcb-version 2.3 \
+  --toolhead usb-c
+sudo reboot
+```
+
+After reconnecting, require the new `808c234c...c92b` hash, an active
+`power_monitor.service`, and an RK805 parent on GPIO line 6 that is neither
+rapidly increasing nor disabled:
+
+```bash
+sha256sum /boot/dtb/rockchip/rk3328-znp-n4plus-n4max-v2.3.dtb
+systemctl is-active power_monitor.service
+grep -E 'rk805|Err:' /proc/interrupts
+journalctl -k -b --no-pager | \
+  grep -Ei 'irq [0-9]+: nobody cared|disabling IRQ|rk805'
+```
 
 If Wi-Fi did not associate, use Ethernet and run `sudo nmtui`. The hardware serial fallback documented by OpenNept4une uses the front I/O USB-C serial connection at 1,500,000 baud, with 115200 as a fallback if required by the adapter/firmware.
 
-Stop here if Linux does not boot consistently, the root filesystem reports errors, or both network paths fail. Restore the raw eMMC backup before attempting any MCU update.
+Stop here if Linux does not boot consistently, the root filesystem reports
+errors, both network paths fail, the RK805 IRQ is disabled, or
+`power_monitor.service` is failed. Restore the raw eMMC backup or correct the
+specific integration fault before attempting any MCU update.
 
 ## 5. Verify USB-C toolhead power on every boot
 
@@ -856,7 +941,12 @@ requirement and you do not have a matching Elegoo binary, stop here. Do not
 assume the Type-C eMMC recovery image contains separate MCU firmware until its
 contents and target have been verified.
 
-It is acceptable if the pre-Klipper application does not match `usb-Klipper_stm32f103xe_*`; that exact production identity is the current TODO. The updater can use the persisted board selection to enter the bootloader through GPIO82.
+It is acceptable if another pre-Klipper application does not match
+`usb-Klipper_stm32f103xe_*`. The first physically validated sample enumerated
+as VID:PID `1d50:614e` with
+`usb-Klipper_stm32f103xe_105B303534340C0039333032-if00`; this is one observed
+device identity, not a universal serial value. The updater can use the
+persisted board selection to enter the bootloader through GPIO82.
 
 Choose the Klipper source revision once, before the first MCU build. The patched updater no longer runs `git pull` implicitly between separate MCU operations; its first run records `~/printer_data/config/Firmware/klipper-build-source.commit`, and every later MCU run must match it:
 
@@ -1739,6 +1829,9 @@ Restoring eMMC alone does not roll back Klipper firmware already flashed into th
 - [ ] Exact factory MCU/toolhead recovery files retained, or the lack of an exact factory rollback was explicitly accepted before flashing
 - [ ] v0.1.7 image hash and destination capacity checked
 - [ ] Board installer selected the 2.3 DTB and its hash was verified after boot
+- [ ] A private, valid `/etc/machine-id` exists and was not copied into logs
+- [ ] RK805 has no `nobody cared`/disabled IRQ and its interrupt count is not storming
+- [ ] `power_monitor.service` remains active without a false-edge `EBUSY` failure
 - [ ] Wi-Fi works, with Ethernet/serial fallback known
 - [ ] GPIO82 service is active and passed repeated cold boots
 - [ ] This fork's working tree/commit was recorded and update origin points to `dalgibbard/OpenNept4une`
