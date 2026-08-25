@@ -1084,8 +1084,35 @@ Download both through Fluidd, or copy them from the printer. Put both in the roo
 1. Shut the printer down cleanly.
 2. Remove mains power.
 3. Insert the card into the hidden mainboard MCU slot, not the Linux/eMMC reader.
-4. Restore power and allow the bootloader time to flash.
-5. Shut down, remove the card, and boot normally.
+4. Restore power and wait at least two full minutes without moving or heating
+   anything. There is no validated external LED or screen indication that
+   proves completion on this board.
+5. If Linux and Fluidd return while the card is still installed, treat a
+   Klipper `Printer is ready` state and the absence of main-MCU connection or
+   protocol errors as useful supporting evidence, not proof that a new image
+   was written.
+6. Shut Linux down cleanly, wait for shutdown to finish, and remove mains
+   power before extracting the card.
+7. Inspect the card on the workstation. The MCU bootloader normally renames
+   the filename it consumed from `.bin` to `.CUR`; later bootloaders use
+   `elegoo_k1.bin`, while earlier variants use `X_4.bin`, which is why the same
+   payload is supplied under both names. Preserve a directory listing. If
+   neither file was consumed or renamed, treat the flash as unconfirmed and
+   stop rather than continuing to the virtual MCU.
+8. Reinstall the mainboard cover, boot normally without the card, and require
+   Fluidd to report `Printer is ready` with no main-MCU connection or protocol
+   errors in `klippy.log`.
+
+Before removing the card, the non-destructive supporting checks are:
+
+```bash
+systemctl status klipper.service --no-pager -l
+grep -E "Loaded MCU 'mcu'|MCU 'mcu' config|mcu 'mcu': Unable to connect|Protocol error" \
+  ~/printer_data/logs/klippy.log | tail -n 30
+```
+
+Do not remove the microSD while the printer is powered. The `.CUR` observation
+is available only after the clean shutdown and physical card removal.
 
 Do not have the C920 or Cartographer connected during this operation.
 
