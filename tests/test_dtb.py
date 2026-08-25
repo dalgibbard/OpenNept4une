@@ -9,7 +9,7 @@ DTB_DIR = REPO_ROOT / "dtb" / "n4plus-n4max-v2.3"
 DTB = DTB_DIR / "rk3328-znp-n4plus-n4max-v2.3.dtb"
 DTS = DTB_DIR / "rk3328-znp-n4plus-n4max-v2.3.dts"
 GUIDE = REPO_ROOT / "docs" / "neptune-4-max-znp-k1-2.3-usb-c-guide.md"
-EXPECTED_DTB_SHA256 = "808c234c5cedb0e5f70d87fc7973d9e2693a7e38563c5ad62c99417b7d22c92b"
+EXPECTED_DTB_SHA256 = "f1b238fcbabf86b17c9e7fdbf1e8916bd36abff6c4687d80efa99ebd6b9f7bc6"
 
 
 def parse_dtb_properties(data):
@@ -68,12 +68,15 @@ class Board23DeviceTreeTests(unittest.TestCase):
         properties = parse_dtb_properties(DTB.read_bytes())
         pmic = properties["/i2c@ff160000/pmic@18"]
         pmic_pin = properties["/pinctrl/pmic/pmic-int-l"]
+        gpio2 = properties["/pinctrl/gpio@ff230000"]
 
+        self.assertEqual(cells(pmic["interrupt-parent"]), cells(gpio2["phandle"]))
         self.assertEqual(cells(pmic["interrupts"]), (6, 8))
         self.assertEqual(cells(pmic_pin["rockchip,pins"])[:2], (2, 6))
 
     def test_source_uses_the_same_rk805_interrupt(self):
         source = DTS.read_text()
+        self.assertIn("interrupt-parent = <0x71>;", source)
         self.assertIn("interrupts = <0x06 0x08>;", source)
         self.assertIn("rockchip,pins = <0x02 0x06 0x00 0x66>;", source)
 

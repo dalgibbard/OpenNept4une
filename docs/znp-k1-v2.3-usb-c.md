@@ -24,9 +24,11 @@ raw backup of the original eMMC before testing it.
   images, is idempotent, and records state for guarded rollback. Mutations
   require root, install root-owned service artifacts, and preflight every
   managed guard before changing either the DTB or power integration.
-- The v2.3 DTB corrects the RK805 PMIC interrupt to GPIO2 line 6, matching its
-  pinctrl and maintained MKS Pi source. Physical testing showed the inherited
-  line-24 value storming until Linux disabled the PMIC IRQ.
+- The v2.3 DTB corrects both parts of the RK805 PMIC interrupt mapping: its
+  parent is GPIO2 and its line is 6, matching the pinctrl and maintained MKS Pi
+  source. Physical testing showed that the inherited GPIO1 parent/line-24
+  mapping, and an intermediate line-only correction, stormed until Linux
+  disabled the PMIC IRQ.
 - The power-loss monitor keeps one supercapacitor GPIO holder across rejected
   false edges and restarts only its edge monitors, avoiding the observed
   `Device or resource busy` failure. Image cleanup now leaves an empty

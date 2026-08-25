@@ -519,7 +519,7 @@ grep '^fdtfile=' /mnt/n4boot/armbianEnv.txt
 Both hashes must be:
 
 ```text
-808c234c5cedb0e5f70d87fc7973d9e2693a7e38563c5ad62c99417b7d22c92b
+f1b238fcbabf86b17c9e7fdbf1e8916bd36abff6c4687d80efa99ebd6b9f7bc6
 ```
 
 The expected selection is:
@@ -530,9 +530,11 @@ fdtfile=rockchip/rk3328-znp-n4plus-n4max-v2.3.dtb
 
 The included 2.3 DTS differs from the 2.0 DTS in Ethernet timing,
 video/IOMMU status, and the RK805 PMIC interrupt. Physical validation found
-the inherited GPIO2 line-24 declaration producing 100,001 unhandled
-interrupts before Linux disabled the RK805 IRQ. The corrected declaration uses
-GPIO2 line 6 (`RK_PA6`), matching both its pinctrl entry and the maintained
+the inherited GPIO1 parent/line-24 declaration producing 100,001 unhandled
+interrupts before Linux disabled the RK805 IRQ. An intermediate correction
+changed only the line and still stormed because the numeric parent phandle
+continued to select GPIO1. The corrected declaration selects GPIO2
+(`gpio@ff230000`) line 6 (`RK_PA6`), matching both its pinctrl entry and the maintained
 [Armbian MKS Pi DTS](https://github.com/armbian/build/blob/e65ba52e3d99004c7dd4e39665e5f9c08516a30a/patch/kernel/archive/rockchip64-6.12/dt/rk3328-mkspi.dts).
 Its USB and UART nodes are unchanged, so the board-specific DTB and GPIO82
 toolhead-power service are both required.
@@ -735,7 +737,7 @@ journalctl -b -p warning --no-pager
 
 The selected path must be
 `rockchip/rk3328-znp-n4plus-n4max-v2.3.dtb`, and its hash must still be
-`808c234c...c92b`. Verify both Ethernet and Wi-Fi if possible; the board-2.3
+`f1b238fc...7bc6`. Verify both Ethernet and Wi-Fi if possible; the board-2.3
 DTB changes Ethernet timing. Also confirm the RK805 interrupt is present but
 not storming or disabled:
 
@@ -750,7 +752,8 @@ An RK805 parent line accumulating roughly 100,000 interrupts followed by
 `nobody cared` or `Disabling IRQ` is a hard stop. Do not use the kernel's
 `irqpoll` suggestion as a workaround and do not flash an MCU.
 
-If the DTB still has the former `c966b74c...e0d8` hash, update this fork's
+If the DTB still has the former `c966b74c...e0d8` or intermediate
+`808c234c...c92b` hash, update this fork's
 checkout, ensure it is clean, and reconcile the corrected integration before
 continuing:
 
@@ -765,7 +768,7 @@ sudo ./img-config/board-hardware-setup.sh apply \
 sudo reboot
 ```
 
-After reconnecting, require the new `808c234c...c92b` hash, an active
+After reconnecting, require the new `f1b238fc...7bc6` hash, an active
 `power_monitor.service`, and an RK805 parent on GPIO line 6 that is neither
 rapidly increasing nor disabled:
 
