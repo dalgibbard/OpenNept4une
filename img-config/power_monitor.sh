@@ -19,6 +19,7 @@ LINE_PWRGOOD="${LINE_PWRGOOD:-19}"   # falling = loss
 LOG_TAG="${LOG_TAG:-power_monitor}"
 VERIFY_SAMPLES="${VERIFY_SAMPLES:-5}"
 VERIFY_INTERVAL_MS="${VERIFY_INTERVAL_MS:-40}"
+EDGE_DEBOUNCE="${EDGE_DEBOUNCE:-20ms}"
 
 # ===== Helpers =====
 log() { echo "$1" | systemd-cat -t "$LOG_TAG" -p info; echo "$1"; }
@@ -47,9 +48,6 @@ fi
 # Track background processes for cleanup
 MON_PIDS=()
 SUPERCAP_PID=""
-EVENT_DIR=""
-EVENT_FIFO=""
-EVENT_FD=""
 
 stop_monitors() {
   local p
@@ -64,15 +62,6 @@ stop_monitors() {
 
 cleanup() {
   stop_monitors
-  if [ -n "$EVENT_FD" ]; then
-    exec {EVENT_FD}>&-
-  fi
-  if [ -n "$EVENT_FIFO" ]; then
-    rm -f -- "$EVENT_FIFO"
-  fi
-  if [ -n "$EVENT_DIR" ]; then
-    rmdir -- "$EVENT_DIR" 2>/dev/null || true
-  fi
   # Kill supercap holder if it exists
   if [ -n "${SUPERCAP_PID}" ] && kill -0 "$SUPERCAP_PID" >/dev/null 2>&1; then
     kill "$SUPERCAP_PID" >/dev/null 2>&1 || true
@@ -144,64 +133,36 @@ start_monitors() {
     return
   fi
 
-  EVENT_DIR="$(mktemp -d)"
-  EVENT_FIFO="${EVENT_DIR}/events"
-  mkfifo "$EVENT_FIFO"
-  exec {EVENT_FD}<>"$EVENT_FIFO"
-
   if $USE_V2; then
-    # Keep both requests open. Re-requesting LINE_PWRLOSS after a rejected
-    # event can itself generate another synthetic rising edge on this board.
-    gpiomon -c "$CHIP" --edges=rising "$LINE_PWRLOSS" >"$EVENT_FIFO" &
+    # Rising-only requests produced a synthetic burst on the ZNP-K1-2.3.
+    # Both-edge requests are stable, and the live-state verification below
+    # determines whether an observed transition represents power loss.
+    gpiomon -c "$CHIP" --edges=both --debounce-period "$EDGE_DEBOUNCE" \
+      -n 1 "$LINE_PWRLOSS" &
     local pid1=$!
     MON_PIDS+=("$pid1")
 
-    gpiomon -c "$CHIP" --edges=falling "$LINE_PWRGOOD" >"$EVENT_FIFO" &
+    gpiomon -c "$CHIP" --edges=both --debounce-period "$EDGE_DEBOUNCE" \
+      -n 1 "$LINE_PWRGOOD" &
     local pid2=$!
     MON_PIDS+=("$pid2")
-    log "Monitors started: PWRLOSS(${LINE_PWRLOSS}↑ pid=$pid1) PWRGOOD(${LINE_PWRGOOD}↓ pid=$pid2)"
+    log "Monitors started: PWRLOSS(${LINE_PWRLOSS}↕ pid=$pid1) PWRGOOD(${LINE_PWRGOOD}↕ pid=$pid2), debounce=${EDGE_DEBOUNCE}"
   else
-    gpiomon --rising-edge "$CHIP" "$LINE_PWRLOSS" >"$EVENT_FIFO" & MON_PIDS+=("$!")
-    gpiomon --falling-edge "$CHIP" "$LINE_PWRGOOD" >"$EVENT_FIFO" & MON_PIDS+=("$!")
+    gpiomon --num-events=1 --rising-edge "$CHIP" "$LINE_PWRLOSS" & MON_PIDS+=("$!")
+    gpiomon --num-events=1 --falling-edge "$CHIP" "$LINE_PWRGOOD" & MON_PIDS+=("$!")
     log "Monitors started: PWRLOSS(${LINE_PWRLOSS}↑) and PWRGOOD(${LINE_PWRGOOD}↓), PIDs: ${MON_PIDS[*]}"
   fi
 }
 
 wait_any_event() {
-  local event p
   if $DEBUG; then
     log "[DEBUG] simulate waiting 30s"; sleep 30; return 0
   fi
 
-  while true; do
-    if IFS= read -r -t 5 -u "$EVENT_FD" event; then
-      log "GPIO edge event: $event"
-      return 0
-    fi
-    for p in "${MON_PIDS[@]}"; do
-      if ! kill -0 "$p" 2>/dev/null; then
-        wait "$p" >/dev/null 2>&1 || true
-        die "GPIO edge monitor pid=$p exited unexpectedly"
-      fi
-    done
-  done
-}
-
-drain_queued_events() {
-  local event count=0
-
-  # GPIO10 can emit a short burst when its request is first established. Once
-  # live sampling has proved the pins stable, coalesce the rest of that stale
-  # burst instead of running the full debounce window for every queued line.
-  while [ "$count" -lt 4096 ] && IFS= read -r -t 0.01 -u "$EVENT_FD" event; do
-    count=$((count + 1))
-  done
-
-  if [ "$count" -gt 0 ]; then
-    log "Discarded ${count} queued edge event(s) after stable-state verification"
-  fi
-  if [ "$count" -eq 4096 ]; then
-    log "WARNING: Edge queue drain limit reached; input may still be noisy"
+  if [ "${BASH_VERSINFO[0]}" -ge 5 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; }; then
+    wait -n "${MON_PIDS[@]}"
+  else
+    wait
   fi
 }
 
@@ -250,31 +211,18 @@ else
   log "WARNING: Unexpected initial state (PWRLOSS=${pl}, PWRGOOD=${pg}). Continuing anyway."
 fi
 
-# Keep the supercapacitor and both input requests held for the service's full
-# lifetime. A false edge returns to the same persistent event stream; releasing
-# and re-requesting GPIO10 can itself produce another synthetic rising edge.
-start_monitors
+# Keep the supercapacitor line held by the one gpioset process above. Input
+# requests are released before live-state verification so gpioget can acquire
+# them, then only those input monitors are re-armed after a false event.
 while true; do
+  start_monitors
   wait_any_event || die "A GPIO edge monitor exited unsuccessfully"
+  stop_monitors
 
   if verify_loss; then
     handle_power_cut
     break
   fi
 
-  drain_queued_events
-
-  # Close the race between the last debounce sample and draining stale events.
-  # If a real loss began in that window, the live levels remain asserted and
-  # must be confirmed even though its edge notification was coalesced.
-  read -r pl pg < <(read_states)
-  if [ "$pl" = "1" ] || [ "$pg" = "0" ]; then
-    log "Loss state present after queue drain; re-verifying."
-    if verify_loss; then
-      handle_power_cut
-      break
-    fi
-  fi
-
-  log "Glitch detected and ignored. Monitors remain armed."
+  log "Glitch detected and ignored. Re-arming debounced monitors."
 done

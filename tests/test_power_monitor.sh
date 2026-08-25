@@ -47,15 +47,17 @@ printf '%s\n' \
   '    ;;' \
   '  gpiomon)' \
   '    case " $* " in' \
+  '      *" --edges=both "*) ;;' \
+  '      *) echo "missing both-edge option: $*" >&2; exit 92 ;;' \
+  '    esac' \
+  '    case " $* " in' \
+  '      *" --debounce-period 20ms "*) ;;' \
+  '      *) echo "missing debounce option: $*" >&2; exit 93 ;;' \
+  '    esac' \
+  '    case " $* " in' \
   '      *" 10 ")' \
-  '        i=0' \
-  '        while test "$i" -lt 25; do' \
-  '          echo "synthetic startup edge $i"' \
-  '          i=$((i + 1))' \
-  '        done' \
-  '        /bin/sleep 1' \
-  '        echo "real loss edge"' \
-  '        /bin/sleep 30' \
+  '        /bin/sleep 0.15' \
+  '        echo "test edge"' \
   '        ;;' \
   '      *) /bin/sleep 30 ;;' \
   '    esac' \
@@ -88,12 +90,10 @@ if ! PATH="${TEST_ROOT}/bin:${PATH}" "$POWER_MONITOR" \
 fi
 
 test "$(<"${TEST_ROOT}/state/gpioset-count")" = 1
-test "$(grep -c 'Monitors started:' "${TEST_ROOT}/power-monitor.output")" = 1
+test "$(grep -c 'Monitors started:' "${TEST_ROOT}/power-monitor.output")" = 2
 grep -Fq 'Verification: 0/5 samples confirmed loss' \
   "${TEST_ROOT}/power-monitor.output"
-grep -Fq 'Discarded 24 queued edge event(s) after stable-state verification' \
-  "${TEST_ROOT}/power-monitor.output"
-grep -Fq 'Glitch detected and ignored. Monitors remain armed.' \
+grep -Fq 'Glitch detected and ignored. Re-arming debounced monitors.' \
   "${TEST_ROOT}/power-monitor.output"
 grep -Fq 'Power loss verified. Initiating safe shutdown...' \
   "${TEST_ROOT}/power-monitor.output"
