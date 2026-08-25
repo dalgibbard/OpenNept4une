@@ -47,6 +47,9 @@ fi
 # Track background processes for cleanup
 MON_PIDS=()
 SUPERCAP_PID=""
+EVENT_DIR=""
+EVENT_FIFO=""
+EVENT_FD=""
 
 stop_monitors() {
   local p
@@ -61,6 +64,15 @@ stop_monitors() {
 
 cleanup() {
   stop_monitors
+  if [ -n "$EVENT_FD" ]; then
+    exec {EVENT_FD}>&-
+  fi
+  if [ -n "$EVENT_FIFO" ]; then
+    rm -f -- "$EVENT_FIFO"
+  fi
+  if [ -n "$EVENT_DIR" ]; then
+    rmdir -- "$EVENT_DIR" 2>/dev/null || true
+  fi
   # Kill supercap holder if it exists
   if [ -n "${SUPERCAP_PID}" ] && kill -0 "$SUPERCAP_PID" >/dev/null 2>&1; then
     kill "$SUPERCAP_PID" >/dev/null 2>&1 || true
@@ -132,40 +144,47 @@ start_monitors() {
     return
   fi
 
+  EVENT_DIR="$(mktemp -d)"
+  EVENT_FIFO="${EVENT_DIR}/events"
+  mkfifo "$EVENT_FIFO"
+  exec {EVENT_FD}<>"$EVENT_FIFO"
+
   if $USE_V2; then
-    # v2: separate invocations for different edge directions
-    gpiomon -c "$CHIP" --edges=rising -n 1 "$LINE_PWRLOSS" &
+    # Keep both requests open. Re-requesting LINE_PWRLOSS after a rejected
+    # event can itself generate another synthetic rising edge on this board.
+    gpiomon -c "$CHIP" --edges=rising "$LINE_PWRLOSS" >"$EVENT_FIFO" &
     local pid1=$!
     MON_PIDS+=("$pid1")
-    
-    gpiomon -c "$CHIP" --edges=falling -n 1 "$LINE_PWRGOOD" &
+
+    gpiomon -c "$CHIP" --edges=falling "$LINE_PWRGOOD" >"$EVENT_FIFO" &
     local pid2=$!
     MON_PIDS+=("$pid2")
-
-    # Do not test these PIDs with kill -0 here. With -n 1, a valid edge may
-    # make gpiomon exit successfully before a liveness check can run. The
-    # following wait collects that status and the debounce logic decides
-    # whether the edge represents a real loss or a startup glitch.
     log "Monitors started: PWRLOSS(${LINE_PWRLOSS}↑ pid=$pid1) PWRGOOD(${LINE_PWRGOOD}↓ pid=$pid2)"
   else
-    # v1: classic syntax (like your working script)
-    gpiomon --num-events=1 --rising-edge "$CHIP" "$LINE_PWRLOSS" & MON_PIDS+=("$!")
-    gpiomon --num-events=1 --falling-edge "$CHIP" "$LINE_PWRGOOD" & MON_PIDS+=("$!")
+    gpiomon --rising-edge "$CHIP" "$LINE_PWRLOSS" >"$EVENT_FIFO" & MON_PIDS+=("$!")
+    gpiomon --falling-edge "$CHIP" "$LINE_PWRGOOD" >"$EVENT_FIFO" & MON_PIDS+=("$!")
     log "Monitors started: PWRLOSS(${LINE_PWRLOSS}↑) and PWRGOOD(${LINE_PWRGOOD}↓), PIDs: ${MON_PIDS[*]}"
   fi
 }
 
 wait_any_event() {
+  local event p
   if $DEBUG; then
     log "[DEBUG] simulate waiting 30s"; sleep 30; return 0
   fi
-  
-  # Wait for ANY monitor to finish
-  if [ "${BASH_VERSINFO[0]}" -ge 5 ] || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 3 ]; }; then
-    wait -n "${MON_PIDS[@]}"
-  else
-    wait
-  fi
+
+  while true; do
+    if IFS= read -r -t 5 -u "$EVENT_FD" event; then
+      log "GPIO edge event: $event"
+      return 0
+    fi
+    for p in "${MON_PIDS[@]}"; do
+      if ! kill -0 "$p" 2>/dev/null; then
+        wait "$p" >/dev/null 2>&1 || true
+        die "GPIO edge monitor pid=$p exited unexpectedly"
+      fi
+    done
+  done
 }
 
 # ===== Verify event (simple debounce/confirm) =====
@@ -213,11 +232,11 @@ else
   log "WARNING: Unexpected initial state (PWRLOSS=${pl}, PWRGOOD=${pg}). Continuing anyway."
 fi
 
-# Keep the supercapacitor line held by the one gpioset process above. A false
-# edge restarts only the two input monitors; re-executing this script would
-# orphan the daemonized holder and make the next gpioset fail with EBUSY.
+# Keep the supercapacitor and both input requests held for the service's full
+# lifetime. A false edge returns to the same persistent event stream; releasing
+# and re-requesting GPIO10 can itself produce another synthetic rising edge.
+start_monitors
 while true; do
-  start_monitors
   wait_any_event || die "A GPIO edge monitor exited unsuccessfully"
 
   if verify_loss; then
@@ -225,6 +244,5 @@ while true; do
     break
   fi
 
-  log "Glitch detected and ignored. Restarting monitors."
-  stop_monitors
+  log "Glitch detected and ignored. Monitors remain armed."
 done

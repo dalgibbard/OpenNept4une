@@ -1835,7 +1835,7 @@ Restoring eMMC alone does not roll back Klipper firmware already flashed into th
 - [ ] A private, valid `/etc/machine-id` exists and was not copied into logs
 - [ ] RK805 has no `nobody cared`/disabled IRQ and its interrupt count is not storming
 - [ ] `power_monitor.service` remains active without a false-edge `EBUSY` failure
-- [ ] An immediate GPIO edge is debounced rather than reported as a monitor startup failure
+- [ ] An immediate GPIO edge is debounced without a repeated synthetic-edge loop
 - [ ] Wi-Fi works, with Ethernet/serial fallback known
 - [ ] GPIO82 service is active and passed repeated cold boots
 - [ ] This fork's working tree/commit was recorded and update origin points to `dalgibbard/OpenNept4une`

@@ -47,10 +47,14 @@ printf '%s\n' \
   '    ;;' \
   '  gpiomon)' \
   '    case " $* " in' \
-  '      *" 10 ") ;;' \
-  '      *) /bin/sleep 0.15 ;;' \
+  '      *" 10 ")' \
+  '        echo "synthetic startup edge"' \
+  '        /bin/sleep 1' \
+  '        echo "real loss edge"' \
+  '        /bin/sleep 30' \
+  '        ;;' \
+  '      *) /bin/sleep 30 ;;' \
   '    esac' \
-  '    echo "test edge"' \
   '    ;;' \
   '  pgrep)' \
   '    exit 1' \
@@ -80,10 +84,10 @@ if ! PATH="${TEST_ROOT}/bin:${PATH}" "$POWER_MONITOR" \
 fi
 
 test "$(<"${TEST_ROOT}/state/gpioset-count")" = 1
-test "$(grep -c 'Monitors started:' "${TEST_ROOT}/power-monitor.output")" = 2
+test "$(grep -c 'Monitors started:' "${TEST_ROOT}/power-monitor.output")" = 1
 grep -Fq 'Verification: 0/5 samples confirmed loss' \
   "${TEST_ROOT}/power-monitor.output"
-grep -Fq 'Glitch detected and ignored. Restarting monitors.' \
+grep -Fq 'Glitch detected and ignored. Monitors remain armed.' \
   "${TEST_ROOT}/power-monitor.output"
 grep -Fq 'Power loss verified. Initiating safe shutdown...' \
   "${TEST_ROOT}/power-monitor.output"

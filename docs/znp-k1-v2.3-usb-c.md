@@ -30,9 +30,9 @@ raw backup of the original eMMC before testing it.
   mapping, and an intermediate line-only correction, stormed until Linux
   disabled the PMIC IRQ.
 - The power-loss monitor keeps one supercapacitor GPIO holder across rejected
-  false edges and restarts only its edge monitors, avoiding the observed
-  `Device or resource busy` failure. It accepts an edge monitor that completes
-  immediately instead of misclassifying the valid event as a startup failure.
+  false edges and keeps both edge-monitor requests open, avoiding the observed
+  `Device or resource busy` failure and a GPIO10 synthetic-edge restart loop.
+  It debounces an event without releasing and re-requesting either input line.
   Image cleanup now leaves an empty
   `/etc/machine-id` placeholder suitable for first-boot initialization.
 - Printer model/PCB/toolhead selection validates only supported tuples and is
