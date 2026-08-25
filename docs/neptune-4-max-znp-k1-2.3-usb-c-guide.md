@@ -92,8 +92,8 @@ Use this order. Each phase has a go/no-go gate so a peripheral failure cannot be
 5. Verify the persistent GPIO82 toolhead-power service.
 6. Put this fork on the printer if it was not copied into the image offline.
 7. Flash only the USB-C toolhead through the guarded updater and its stable bootloader by-id path.
-8. Flash the main MCU by microSD, then update the virtual Linux MCU separately.
-9. Generate the Max/2.3/USB-C configuration and perform cold pin/sensor checks.
+8. Generate the Max/2.3/USB-C configuration so Klipper can identify the installed MCUs.
+9. Update and verify the main MCU, then verify or update the virtual Linux MCU separately.
 10. Establish a working baseline using the factory inductive probe.
 11. Add and calibrate Cartographer.
 12. Add the C920.
@@ -1029,7 +1029,42 @@ checksum manifest there. A later `make clean` or another MCU build overwrites
 `~/klipper/out/klipper.bin`; the versioned archive is the durable recovery
 copy.
 
-## 8. Update the main MCU and virtual Linux MCU separately
+## 8. Generate the Max/2.3/USB-C configuration
+
+Klipper cannot inspect the main MCU, report its installed firmware identity, or
+request its serial bootloader without a valid `printer.cfg`. Generate the
+machine configuration before deciding whether the main MCU needs another flash.
+The final USB-C toolhead by-id path must already exist:
+
+```bash
+cp -a ~/printer_data/config ~/printer_data/config.before-n4max-v2.3-usbc
+
+~/OpenNept4une/OpenNept4une.sh \
+  --yes \
+  --printer_model n4max \
+  --pcb_version 2.3 \
+  --toolhead usb-c \
+  install_printer_cfg </dev/null
+
+sudo systemctl restart klipper.service
+sleep 15
+curl -sS http://127.0.0.1/printer/info | jq .
+```
+
+Require `Printer is ready`, then record all three MCU identities before
+continuing:
+
+```bash
+grep -E "Loaded MCU '(mcu|THR|rpi)'" \
+  ~/printer_data/logs/klippy.log | tail -n 12
+```
+
+An Elegoo identity such as `KLP_ELEGOO_N4_M_K1_...` proves the main controller
+is communicating but still runs Elegoo's application. It does not prove that
+the newly archived OpenNept4une build was installed. After a successful update,
+the main MCU must identify with the intended coordinated Klipper source version.
+
+## 9. Update the main MCU and virtual Linux MCU separately
 
 ### Main MCU: use microSD
 
@@ -1093,12 +1128,12 @@ Download both through Fluidd, or copy them from the printer. Put both in the roo
    was written.
 6. Shut Linux down cleanly, wait for shutdown to finish, and remove mains
    power before extracting the card.
-7. Inspect the card on the workstation. The MCU bootloader normally renames
-   the filename it consumed from `.bin` to `.CUR`; later bootloaders use
+7. Inspect the card on the workstation. Some MCU bootloaders rename the file
+   they consumed from `.bin` to `.CUR`, but that behavior is not documented as
+   a reliable success signal for every Elegoo bootloader. Later bootloaders use
    `elegoo_k1.bin`, while earlier variants use `X_4.bin`, which is why the same
-   payload is supplied under both names. Preserve a directory listing. If
-   neither file was consumed or renamed, treat the flash as unconfirmed and
-   stop rather than continuing to the virtual MCU.
+   payload is supplied under both names. Preserve a directory listing, but use
+   Klipper's reported main-MCU identity after reboot as the decisive check.
 8. Reinstall the mainboard cover, boot normally without the card, and require
    Fluidd to report `Printer is ready` with no main-MCU connection or protocol
    errors in `klippy.log`.
@@ -1111,14 +1146,110 @@ grep -E "Loaded MCU 'mcu'|MCU 'mcu' config|mcu 'mcu': Unable to connect|Protocol
   ~/printer_data/logs/klippy.log | tail -n 30
 ```
 
-Do not remove the microSD while the printer is powered. The `.CUR` observation
-is available only after the clean shutdown and physical card removal.
+Do not remove the microSD while the printer is powered. Any `.CUR` observation
+is available only after the clean shutdown and physical card removal, and is
+supporting evidence rather than proof on this board.
 
 Do not have the C920 or Cartographer connected during this operation.
 
+### Validated serial fallback for the ZNP-K1-2.3 main MCU
+
+On 2026-08-25, the reference fork's pristine `n4flash` main-controller path
+was successfully validated on the Neptune 4 Max / `ZNP-K1-2.3` / USB-C machine
+used for this guide after its microSD bootloader did not consume either staged
+filename. Do not use this as the first-choice update method: it erases the MCU
+application region once transfer starts, and bootloader entry is timing
+sensitive.
+
+This fallback requires all of the following:
+
+- Klipper already reaches `Printer is ready` with the installed main MCU over
+  `/dev/ttyS0`, so `firmware_restart` can request its bootloader.
+- A checksum-verified `main-mcu` build archive from the coordinated Klipper
+  source revision exists. Never use the shared `~/klipper/out/klipper.bin`,
+  which another target build may have replaced.
+- Printer power remains stable from START until transfer completion.
+- The final main-MCU identity is checked even if the pristine utility prints
+  `> done`; that implementation does not make its exit status depend on the
+  final END acknowledgement.
+
+The exact validated pristine source was
+`gggcodes/n4flash@686c3bf1d0ea5f98d991ea56a3f5a35944f300fd`:
+
+```text
+n4flash.c SHA-256:
+fed0708f556462a6d02aba6627237b42bcdaffc3bbafde34751dbc1602f2cb2d
+```
+
+Fetch and compile that exact source on the printer:
+
+```bash
+git clone https://codeberg.org/gggcodes/n4flash.git ~/n4flash-source
+git -C ~/n4flash-source checkout --detach \
+  686c3bf1d0ea5f98d991ea56a3f5a35944f300fd
+
+printf '%s  %s\n' \
+  fed0708f556462a6d02aba6627237b42bcdaffc3bbafde34751dbc1602f2cb2d \
+  "$HOME/n4flash-source/n4flash.c" | sha256sum --check --strict
+
+cc -O2 -Wall -Wextra -o ~/n4flash ~/n4flash-source/n4flash.c
+chmod 0755 ~/n4flash
+```
+
+Select the exact archive printed by the updater; do not blindly select the
+newest directory. Replace the placeholder below, then validate both its target
+and checksum manifest:
+
+```bash
+main_archive="$HOME/printer_data/config/Firmware/builds/REPLACE_WITH_EXACT_MAIN_MCU_ARCHIVE"
+main_firmware="${main_archive}/klipper.bin"
+
+test -d "$main_archive" || { echo 'Exact main-MCU archive not found; stop.' >&2; exit 1; }
+grep -Fx 'target=main-mcu' "$main_archive/build-metadata.txt" || exit 1
+(cd "$main_archive" && sha256sum --check --strict SHA256SUMS) || exit 1
+test -s "$main_firmware" || exit 1
+test -w /dev/ttyS0 || exit 1
+```
+
+With the printer idle and power stable, enter the bootloader and immediately
+run the transfer:
+
+```bash
+curl --fail --silent --show-error \
+  http://127.0.0.1/printer/firmware_restart -d 0
+sleep 1
+sudo systemctl stop klipper.service
+~/n4flash "$main_firmware" /dev/ttyS0
+```
+
+Do not interrupt the printer after n4flash reports `sending start`. If it
+prints `> failed`, times out, or disconnects after START, keep the printer
+powered and preserve the complete output for recovery diagnosis. After
+`> done`, restart Klipper and require the main MCU to report the coordinated
+source version rather than `KLP_ELEGOO_...`:
+
+```bash
+sudo systemctl start klipper.service
+sleep 15
+curl -sS http://127.0.0.1/printer/info | jq .
+grep "Loaded MCU 'mcu'" ~/printer_data/logs/klippy.log | tail -n 1
+```
+
 ### Virtual Linux MCU
 
-Run the updater again and choose only **Virtual RPi**:
+The virtual RPi MCU is the `klipper_mcu` Linux service and executable stored on
+the eMMC, not another physical controller. A prepared image may already contain
+a compatible build. Check the latest MCU identities first:
+
+```bash
+grep -E "Loaded MCU '(mcu|THR|rpi)'" \
+  ~/printer_data/logs/klippy.log | tail -n 3
+```
+
+If `rpi` already reports the same Klipper source version as the host, main MCU,
+and THR, do not rebuild it merely to repeat the same version. If it is absent or
+reports a different source version, run the updater again and choose only
+**Virtual RPi**:
 
 ```bash
 ~/OpenNept4une/OpenNept4une.sh update_mcu_rpi_fw
@@ -1128,24 +1259,10 @@ Allow its reboot. The patched menu offers only one target per run.
 
 After reboot, check Klipper's log and web UI. The main MCU, THR MCU, and Klipper host must report mutually compatible protocol versions before continuing.
 
-## 9. Generate Max/2.3/USB-C configuration
+### Verify the generated machine configuration
 
-First back up the fresh image's current config:
-
-```bash
-cp -a ~/printer_data/config ~/printer_data/config.before-n4max-v2.3-usbc
-```
-
-Generate the exact machine selection. The final toolhead by-id path must already exist:
-
-```bash
-~/OpenNept4une/OpenNept4une.sh \
-  --yes \
-  --printer_model n4max \
-  --pcb_version 2.3 \
-  --toolhead usb-c \
-  install_printer_cfg </dev/null
-```
+Section 8 generated the exact machine selection before MCU inspection and
+updates. Recheck it here after the coordinated MCU set is running.
 
 The resulting model flag should contain:
 
@@ -1183,7 +1300,29 @@ grep -n 'THR:PB10\|neopixel toolhead_led' \
 sudo ~/OpenNept4une/img-config/board-hardware-setup.sh status
 ```
 
-On a fresh install, install the other OpenNept4une configuration set from menu option 2 and choose **All** within that **configuration installer**. This is unrelated to the removed MCU `All` action. It overwrites configuration files, so do it before Cartographer customization.
+### Install the remaining fresh-image configuration set
+
+This is a required fresh-install step and is separate from generating
+`printer.cfg`. Run the configuration installer before checking Moonraker or
+making Cartographer, webcam, KAMP, Mainsail, or Fluidd customizations:
+
+```bash
+~/OpenNept4une/OpenNept4une.sh install_configs
+```
+
+Confirm installation, then choose **1) All** inside this **configuration
+installer**. This is unrelated to the removed MCU `All` action. It installs or
+overwrites the stock OpenNept4une configuration files, including
+`moonraker.conf`, and immediately rewrites its OpenNept4une update-manager block
+from the active checkout's real branch and `origin` URL.
+
+Restart Moonraker after the installer returns:
+
+```bash
+sudo systemctl restart moonraker.service
+sleep 5
+systemctl is-active moonraker.service
+```
 
 Then inspect `~/printer_data/config/moonraker.conf`. This fork should have generated this block from the checkout's real `origin`:
 
@@ -1221,16 +1360,124 @@ journalctl -u klipper.service -b --no-pager -n 150
 In the Klipper console:
 
 1. Confirm hotend, bed, host, and THR temperatures are plausible room-temperature values. A value near zero, several hundred degrees, or a rapidly changing idle value is a stop condition.
-2. Run `QUERY_ENDSTOPS`; manually actuate each physical endstop and verify only the expected axis changes.
-3. Run `QUERY_PROBE`; bring metal to the factory probe and verify its state changes.
+2. Confirm the generated `[stepper_x]` and `[stepper_y]` sections use
+   `tmc2209_stepper_x:virtual_endstop` and
+   `tmc2209_stepper_y:virtual_endstop`. The Max uses TMC2209 StallGuard
+   sensorless homing for X/Y; it has no X/Y microswitches to press. Do not try
+   to trigger these by pushing an energised carriage or bed. `QUERY_ENDSTOPS`
+   is only a passive status snapshot for these virtual endstops, not a useful
+   hand-actuation test.
+3. Z uses the factory inductive probe as `probe:z_virtual_endstop`, not a
+   separate Z switch. Run `QUERY_PROBE`, bring a clean metal object underneath
+   the probe's sensing face without touching the nozzle, run `QUERY_PROBE`
+   again, and require its state to change. Remove the metal and require it to
+   return to the original state.
 4. Run `QUERY_FILAMENT_SENSOR SENSOR=filament_sensor`; insert/remove filament and compare behavior with the stock configuration. Keep the sensor disabled if it is wrong.
-5. Use `STEPPER_BUZZ STEPPER=stepper_x`, then Y and Z, only with safe physical clearance. Confirm each motor, direction, and one-millimetre return.
-6. Test each fan at low duty and identify it physically.
-7. Briefly request a low hotend target, such as 40 C, while watching the displayed temperature and keeping a hand on the emergency power switch. Cancel immediately after confirming the correct sensor rises. Repeat separately for the bed.
+5. With the toolhead and bed manually positioned away from every hard limit
+   while motors are off, use `STEPPER_BUZZ STEPPER=stepper_x`, then Y and Z,
+   only with safe physical clearance. Confirm the intended axis moves and
+   returns approximately one millimetre; this verifies identity/direction
+   before any homing move.
+6. With a hand on the printer's power switch and the travel path clear, test
+   sensorless homing one axis at a time using `G28 X` and then `G28 Y`. Each
+   axis must travel toward its configured zero end, make only a controlled
+   contact with the mechanical limit, and stop immediately. Cut power if it
+   moves the wrong way, grinds, repeatedly strikes the limit, or does not stop.
+7. Test each fan at low duty and identify it physically.
+8. Briefly request a low hotend target, such as 40 C, while watching the displayed temperature and keeping a hand on the emergency power switch. Cancel immediately after confirming the correct sensor rises. Repeat separately for the bed.
 
-Do not home Z until the factory probe is proven. Do not install Cartographer until the printer can home carefully, mesh with the factory probe, heat correctly, and complete a conservative first-layer test.
+Do not home Z until the factory probe is proven.
 
-That known-good checkpoint is essential: it separates base board/toolhead problems from Cartographer problems.
+### Calibrate the bed with the factory probe
+
+Complete this calibration and a baseline print before removing or disabling the
+factory probe. Use a clean plate and nozzle, and keep the same plate, bed
+temperature, heat-soak time, filament, slicer profile, and first-layer test for
+the later Cartographer comparison.
+
+First tram the heated bed mechanically. The generated configuration provides
+`BED_LEVEL_SCREWS_TUNE`, which clears the old mesh, heats the bed to its current
+target or 60 C, waits for temperature, homes, and runs
+`SCREWS_TILT_CALCULATE`:
+
+```text
+BED_LEVEL_SCREWS_TUNE
+```
+
+Adjust each bed knob in the direction and clock amount reported by Klipper,
+then rerun `BED_LEVEL_SCREWS_TUNE`. Repeat until every adjustable point is
+approximately `00:05` or better relative to the reference screw. This changes
+the physical bed plane, so any earlier probe Z offset or mesh is now invalid.
+
+For reference, the equivalent individual console commands at 60 C are:
+
+```text
+BED_MESH_CLEAR
+SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60
+TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=58 MAXIMUM=65
+G28
+SCREWS_TILT_CALCULATE
+```
+
+Next calibrate the factory probe's Z offset using Klipper's paper test. Turn
+the heaters off and let the clean nozzle and bed return to room temperature
+before this step:
+
+```text
+TURN_OFF_HEATERS
+G28
+PROBE_CALIBRATE
+```
+
+When the manual-probe prompt appears, place ordinary printer paper under the
+nozzle and approach in progressively smaller steps, for example:
+
+```text
+TESTZ Z=-0.1
+TESTZ Z=-0.05
+TESTZ Z=-0.01
+```
+
+Use a positive value to back away if necessary. When the paper has slight,
+repeatable drag, finish with:
+
+```text
+ACCEPT
+SAVE_CONFIG
+```
+
+`SAVE_CONFIG` restarts Klipper. After it returns, heat and soak the bed using
+the same conditions intended for the baseline print, then check repeatability
+and create a full mesh:
+
+```text
+BED_MESH_CLEAR
+SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60
+TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=58 MAXIMUM=65
+G4 P600000
+G28
+PROBE_ACCURACY SAMPLES=10
+BED_MESH_CALIBRATE
+SAVE_CONFIG
+```
+
+Inspect the `PROBE_ACCURACY` range and stop if it is inconsistent or has
+outliers. After the restart, use `BED_MESH_OUTPUT` to retain the baseline mesh
+output, then print a conservative single-layer square/grid or another known
+first-layer test. Watch the entire first layer and use emergency stop if the
+nozzle approaches the plate incorrectly. Save the successful G-code, slicer
+profile, mesh screenshot/output, and a photograph of the first layer, then
+back up the calibrated configuration:
+
+```bash
+cp -a ~/printer_data/config \
+  ~/printer_data/config.factory-probe-baseline
+```
+
+Do not install Cartographer until the printer can home carefully, tram and
+mesh with the factory probe, heat correctly, and complete this baseline print.
+That known-good checkpoint separates base board/toolhead problems from
+Cartographer installation or calibration problems.
 
 ## 11. Cartographer v4 over USB
 
@@ -1342,6 +1589,23 @@ homing_retract_dist: 0
 
 Do not reuse the stock probe offsets `-24.25, 20.45` for a Cartographer mount.
 
+If using the exact
+[Beacon3D Neptune 4 Max mount](https://www.printables.com/model/858227-beacon3d-neptune-4-max-mount),
+the mount-specific starting offsets validated on the machine used for this
+guide are:
+
+```ini
+[cartographer]
+x_offset: 0
+y_offset: 20.6
+```
+
+These values apply to that printed mount and orientation only. Before any Z
+home, verify physically at high Z that positive Y places the Cartographer coil
+20.6 mm from the nozzle in the direction represented by the configuration.
+Re-measure if the part is mirrored, modified, mounted in another orientation,
+or has appreciable print/assembly tolerance.
+
 The generated safe-home, bed-mesh, screws, and axis-twist coordinates are tied to the old probe offset. Recalculate them before any Z home:
 
 - desired physical coil/reference centre on the Max: approximately `(215, 215)`;
@@ -1367,7 +1631,78 @@ mesh_pps: 0,0
 
 Disable or clear the old `[axis_twist_compensation]` data initially. Recalibrate it with the current Cartographer command only after scan/touch calibration is complete.
 
-Do not enable Cartographer's optional ADXL at first. The fork already configures the USB-C toolhead LIS2DW for X and the host ADXL345 for the Max's bed/Y axis.
+Do not enable Cartographer's optional ADXL during initial probe bring-up. The
+generated USB-C configuration already uses the toolhead's LIS2DW for X and the
+host-connected ADXL345 for the Max's bed/Y axis. Establish the Cartographer
+probe baseline first so an accelerometer configuration error cannot be confused
+with a probing problem.
+
+### Later option: use the Cartographer v4 accelerometer for X
+
+Do not perform this optional subsection during the initial installation. Finish
+the restart, calibration order, mesh, and Cartographer baseline print below
+first; then return here. After that baseline is proven, its onboard
+ADXL345 can replace the USB-C toolhead's LIS2DW as the X/toolhead sensor. Keep
+the existing host-connected `[adxl345 y]` for the moving bed. Cartographer v4
+uses `cartographer:PA0`; the `PA3` examples found in older documentation are for
+v3. Selecting the wrong chip-select pin can prevent the Cartographer MCU from
+starting correctly.
+
+Back up the working configuration, then remove or comment out the complete
+generated `[lis2dw x]` section. Do not remove `[adxl345 y]`. Add this single X
+sensor section:
+
+```ini
+[adxl345 x]
+cs_pin: cartographer:PA0
+spi_bus: spi1
+# axes_map: <VERIFY_FOR_THE_PRINTED_MOUNT_ORIENTATION>
+```
+
+Edit the existing `[resonance_tester]` section rather than creating a second
+one. Change only its X sensor and retain the Max's existing Y sensor, limits,
+and centre test point:
+
+```ini
+[resonance_tester]
+accel_chip_x: adxl345 x
+accel_chip_y: adxl345 y
+max_smoothing: 1
+min_freq: 5
+max_freq: 90
+accel_per_hz: 120
+hz_per_sec: 2
+probe_points:
+    215, 215, 20
+```
+
+There must be exactly one active `[resonance_tester]`, one `[adxl345 x]`, and
+one `[adxl345 y]`, with no active `[lis2dw x]`. Restart Klipper and validate
+both chips before resonance testing:
+
+```text
+ACCELEROMETER_QUERY CHIP=x
+MEASURE_AXES_NOISE CHIP=x
+ACCELEROMETER_QUERY CHIP=y
+MEASURE_AXES_NOISE CHIP=y
+```
+
+At rest, each query must return plausible acceleration with one mapped axis
+dominated by gravity, and the noise command must complete without an MCU/SPI
+error. Determine and verify `axes_map` for the actual printed mount orientation;
+do not copy the old LIS2DW mapping because it describes a different chip and
+PCB orientation. Stop the C920 stream during resonance capture to reduce USB
+and host load, then calibrate each moving system separately:
+
+```text
+SHAPER_CALIBRATE AXIS=X
+SHAPER_CALIBRATE AXIS=Y
+SAVE_CONFIG
+```
+
+Inspect both generated graphs/recommendations before accepting them. Restore
+the saved LIS2DW configuration if the Cartographer ADXL does not enumerate
+reliably or produces clipping, excessive noise, or implausible axes.
 
 Restart Klipper now—Moonraker's earlier restart does not load these printer configuration changes—and stop before motion if it reports any error:
 
@@ -1388,15 +1723,105 @@ Have emergency stop/power within reach and watch every first descent:
 
 1. Verify X/Y travel, signs of measured offsets, safe-home point, and every mesh corner at high Z.
 2. `G28 X Y`
-3. `CARTOGRAPHER_SCAN_CALIBRATE`
-4. Use `TESTZ Z=-0.01` cautiously to approach paper drag while retaining a visible gap, then `ACCEPT` and `SAVE_CONFIG`.
-5. Mechanically tram the bed and repeat scan calibration if the bed or gantry changed.
+3. Perform an initial `CARTOGRAPHER_SCAN_CALIBRATE` and paper test so the new
+   probe can establish Z safely.
+4. Mechanically tram the bed with the recalculated Cartographer screw
+   coordinates.
+5. Because moving the bed screws changes the probe/nozzle relationship, repeat
+   scan calibration after the final screw adjustment.
 6. Clean the plate and nozzle; confirm the coil remains 2.6-3.0 mm above the nozzle.
-7. `G28 X Y`
-8. `CARTOGRAPHER_TOUCH_CALIBRATE`
-9. `SAVE_CONFIG`
-10. Verify `CARTOGRAPHER_QUERY FIELD=all`, `PROBE_ACCURACY`, and `CARTOGRAPHER_TOUCH_ACCURACY` using the current plugin's syntax.
-11. Run a full `BED_MESH_CALIBRATE` only after those checks pass.
+7. Perform `CARTOGRAPHER_TOUCH_CALIBRATE` only after the bed plane and scan
+   calibration are final.
+8. Verify `CARTOGRAPHER_QUERY FIELD=all`, `PROBE_ACCURACY`, and
+   `CARTOGRAPHER_TOUCH_ACCURACY` using the current plugin's syntax.
+9. Run a full `BED_MESH_CALIBRATE` only after those checks pass.
+
+The concrete scan and paper-test sequence is:
+
+```text
+G28 X Y
+CARTOGRAPHER_SCAN_CALIBRATE
+TESTZ Z=-0.1
+TESTZ Z=-0.05
+TESTZ Z=-0.01
+ACCEPT
+SAVE_CONFIG
+```
+
+After Klipper restarts, mechanically tram the bed using the new probe:
+
+```text
+BED_LEVEL_SCREWS_TUNE
+```
+
+This uses the initial scan calibration to home Z and repeats the same mechanical
+tramming pattern used for the stock probe. `BED_LEVEL_SCREWS_TUNE` is safe here
+only after its screw coordinates and the Cartographer homing path have been
+verified at high Z. Adjust the knobs and repeat until each point is
+approximately `00:05` or better.
+
+Tramming changed the bed plane, so redo scan calibration rather than preserving
+the bootstrap result. Turn the heaters off and let the clean bed and nozzle
+return to room temperature before repeating the paper test:
+
+```text
+TURN_OFF_HEATERS
+G28 X Y
+CARTOGRAPHER_SCAN_CALIBRATE
+TESTZ Z=-0.1
+TESTZ Z=-0.05
+TESTZ Z=-0.01
+ACCEPT
+SAVE_CONFIG
+```
+
+After Klipper restarts, clean the plate and nozzle, reconfirm the coil height,
+then complete touch calibration against the final bed plane and save it
+separately:
+
+```text
+G28 X Y
+CARTOGRAPHER_TOUCH_CALIBRATE
+SAVE_CONFIG
+```
+
+After the next restart, use the same bed temperature and ten-minute soak as the
+stock baseline, verify repeatability, and generate a fresh Cartographer mesh:
+
+```text
+BED_MESH_CLEAR
+SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60
+TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=58 MAXIMUM=65
+G4 P600000
+G28
+CARTOGRAPHER_QUERY FIELD=all
+PROBE_ACCURACY SAMPLES=10
+CARTOGRAPHER_TOUCH_ACCURACY
+BED_MESH_CALIBRATE
+SAVE_CONFIG
+```
+
+Do not load or retain the stock-probe mesh or Z offset. After the restart, run
+`BED_MESH_OUTPUT`, then print the saved factory-probe baseline G-code with the
+same plate, material, temperatures, and print settings. Compare first-layer
+consistency rather than comparing the two probes' numeric Z-offset values.
+Save the Cartographer mesh output and a photograph, and back up the successful
+configuration:
+
+```bash
+cp -a ~/printer_data/config \
+  ~/printer_data/config.cartographer-baseline
+```
+
+The two commissioning checkpoints intentionally follow the same pattern:
+
+| Checkpoint | Factory inductive probe | Cartographer |
+|---|---|---|
+| Mechanical bed tramming | `BED_LEVEL_SCREWS_TUNE` | `BED_LEVEL_SCREWS_TUNE` after recalculating and verifying screw coordinates |
+| Probe/nozzle reference | `PROBE_CALIBRATE`, paper test, `ACCEPT`, `SAVE_CONFIG` | Scan calibration and paper test, final touch calibration, saving after each stage |
+| Repeatability | `PROBE_ACCURACY SAMPLES=10` | `CARTOGRAPHER_QUERY`, `PROBE_ACCURACY SAMPLES=10`, and `CARTOGRAPHER_TOUCH_ACCURACY` |
+| Bed compensation | Fresh full `BED_MESH_CALIBRATE` | Discard stock mesh; create a fresh full `BED_MESH_CALIBRATE` |
+| Print validation | Save first-layer test G-code, settings, mesh output, and photograph | Repeat the same G-code/settings and compare first-layer consistency |
 
 For the first-layer adjustment, use `CARTOGRAPHER_TOUCH_HOME`, babystep carefully, then `Z_OFFSET_APPLY_PROBE` and `SAVE_CONFIG`. Do not hand-edit the saved model's Z offset.
 
@@ -1797,7 +2222,7 @@ documented.
 
 The main-MCU OpenNept4une archive can be restaged to a FAT32 microSD after its
 checksum manifest is verified. Copy its `klipper.bin` twice as `X_4.bin` and
-`elegoo_k1.bin`, then follow section 8's powered-off microSD procedure. This
+`elegoo_k1.bin`, then follow section 9's powered-off microSD procedure. This
 restores that archived OpenNept4une build; it does not restore Elegoo firmware.
 Replace the all-caps directory component below with the exact archive printed
 by the updater:
@@ -1878,7 +2303,7 @@ Restoring eMMC alone does not roll back Klipper firmware already flashed into th
 - [ ] Toolhead application and bootloader by-id/udev identities were captured
 - [ ] Versioned main-MCU and toolhead OpenNept4une build archives and checksum manifests were copied off-device
 - [ ] Toolhead was flashed through its unique `usb-MKS_DRIVER_BOOT_*` path after VID/PID validation
-- [ ] Main MCU was flashed by microSD, not experimental serial
+- [ ] Main MCU reports the coordinated Klipper source version; its successful update method was recorded
 - [ ] Main, THR, and virtual MCU protocol versions match
 - [ ] `N4Max-v2.3-tusbc` config generated and backed up
 - [ ] Temperatures, endstops, stock probe, runout sensor, fans, lights, and motor directions checked cold
