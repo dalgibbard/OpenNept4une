@@ -1,0 +1,141 @@
+=== system state ===
+degraded
+  UNIT                          LOAD   ACTIVE SUB    DESCRIPTION
+● mjpg-streamer-webcam1.service loaded failed failed MJPG Streamer Service for Webcam 1
+● power_monitor.service         loaded failed failed Power Cut Monitor and Safe Shutdown
+
+Legend: LOAD   → Reflects whether the unit definition was properly loaded.
+        ACTIVE → The high-level unit activation state, i.e. generalization of SUB.
+        SUB    → The low-level unit activation state, values depend on unit type.
+
+2 loaded units listed.
+=== root filesystem ===
+/dev/mmcblk1p2 ext4 rw,relatime,errors=remount-ro,commit=120
+=== machine-id ===
+ls: cannot access '/etc/machine-id': No such file or directory
+lrwxrwxrwx 1 root root 15 Nov 22  2025 /var/lib/dbus/machine-id -> /etc/machine-id
+cat: /etc/machine-id: No such file or directory
+=== power monitor ===
+× power_monitor.service - Power Cut Monitor and Safe Shutdown
+     Loaded: loaded (/etc/systemd/system/power_monitor.service; enabled; preset: enabled)
+    Drop-In: /run/systemd/system.control/power_monitor.service.d
+             └─50-AllowedCPUs.conf
+     Active: failed (Result: exit-code) since Tue 2026-08-25 12:46:23 UTC; 14min ago
+   Duration: 9month 1d 22h 50min 53.649s
+ Invocation: a42022f0cc2d430690548af188c92fbd
+   Main PID: 528 (code=exited, status=1/FAILURE)
+   Mem peak: 5.2M
+        CPU: 1.369s
+
+Aug 25 12:46:22 znp-k1 power_monitor.sh[859]: 241.564160140        rising        gpiochip1 10
+Aug 25 12:46:22 znp-k1 power_monitor.sh[528]: Verifying power loss condition...
+Aug 25 12:46:23 znp-k1 power_monitor.sh[528]: Verification: 0/5 samples confirmed loss
+Aug 25 12:46:23 znp-k1 power_monitor.sh[528]: Glitch detected and ignored. Restarting monitors.
+Aug 25 12:46:23 znp-k1 power_monitor.sh[528]: Detected libgpiod: gpioinfo (libgpiod) v2.2.1
+Aug 25 12:46:23 znp-k1 power_monitor.sh[528]: Using libgpiod v2 tool syntax
+Aug 25 12:46:23 znp-k1 power_monitor.sh[1881]: gpioset: unable to request lines on chip '/dev/gpiochip1': Device or resource busy
+Aug 25 12:46:23 znp-k1 systemd[1]: power_monitor.service: Main process exited, code=exited, status=1/FAILURE
+Aug 25 12:46:23 znp-k1 systemd[1]: power_monitor.service: Failed with result 'exit-code'.
+Aug 25 12:46:23 znp-k1 systemd[1]: power_monitor.service: Consumed 1.369s CPU time, 5.2M memory peak.
+[   20.098279] znp-k1 systemd[1]: Started power_monitor.service - Power Cut Monitor and Safe Shutdown.
+[   20.743358] znp-k1 power_monitor[584]: Detected libgpiod: gpioinfo (libgpiod) v2.2.1
+[   20.772938] znp-k1 power_monitor.sh[528]: Detected libgpiod: gpioinfo (libgpiod) v2.2.1
+[   20.926020] znp-k1 power_monitor.sh[528]: Using libgpiod v2 tool syntax
+[   21.559656] znp-k1 power_monitor.sh[528]: Super-capacitor charging enabled (GPIO 21 HIGH) [v2 daemonized]
+[   22.184108] znp-k1 power_monitor[843]: Initial states — PowerLoss(10)=0, PowerGood(19)=1
+[   22.189001] znp-k1 power_monitor.sh[528]: Initial states — PowerLoss(10)=0, PowerGood(19)=1
+[   22.243475] znp-k1 power_monitor.sh[528]: Pins in expected stable state. Starting monitors.
+[   22.401201] znp-k1 power_monitor.sh[528]: Monitors started: PWRLOSS(10↑ pid=859) PWRGOOD(19↓ pid=861)
+[  241.567569] znp-k1 power_monitor.sh[859]: 241.564160140        rising        gpiochip1 10
+[  241.604838] znp-k1 power_monitor.sh[528]: Verifying power loss condition...
+[  242.336470] znp-k1 power_monitor.sh[528]: Verification: 0/5 samples confirmed loss
+[  242.370289] znp-k1 power_monitor.sh[528]: Glitch detected and ignored. Restarting monitors.
+[  242.435451] znp-k1 power_monitor.sh[528]: Detected libgpiod: gpioinfo (libgpiod) v2.2.1
+[  242.483048] znp-k1 power_monitor.sh[528]: Using libgpiod v2 tool syntax
+[  242.490586] znp-k1 power_monitor.sh[1881]: gpioset: unable to request lines on chip '/dev/gpiochip1': Device or resource busy
+[  242.494331] znp-k1 systemd[1]: power_monitor.service: Main process exited, code=exited, status=1/FAILURE
+[  242.499274] znp-k1 systemd[1]: power_monitor.service: Failed with result 'exit-code'.
+[  242.502100] znp-k1 systemd[1]: power_monitor.service: Consumed 1.369s CPU time, 5.2M memory peak.
+=== interrupts ===
+           CPU0       CPU1       CPU2       CPU3       
+  9:          0          0          0          0    GICv2  25 Level     vgic
+ 11:      98225      62624      88703      73181    GICv2  30 Level     arch_timer
+ 12:          0          0          0          0    GICv2  27 Level     kvm guest vtimer
+ 18:          0          0          0          0    GICv2  94 Level     rockchip_usb2phy
+ 19:       1831          0          0          0    GICv2  32 Level     ff1f0000.dma-controller
+ 20:          0          0          0          0    GICv2  33 Level     ff1f0000.dma-controller
+ 22:         66       3779          0          0    GICv2  88 Level     ttyS1
+ 23:         11          0          0          0    GICv2  89 Level     ttyS2
+ 24:          0          0          0          0    GICv2  43 Level     ff350800.iommu
+ 25:          0          0          0          0    GICv2 106 Level     ff360480.iommu
+ 26:          0          0          0          0    GICv2  64 Level     ff373f00.iommu, ff370000.vop
+ 27:          0          0          0          0    GICv2  63 Level     ff3a0800.iommu
+ 28:          0          0          0          0    GICv2  81 Level     ff190000.spi
+ 29:         33          0       1859          0    GICv2  99 Level     xhci-hcd:usb2
+ 30:         85          0          0          0    GICv2  55 Level     ff580000.usb, dwc2_hsotg:usb1
+ 31:          0          0          0          0    GICv2  48 Level     ehci_hcd:usb3
+ 32:          0          0          0          0    GICv2  49 Level     ohci_hcd:usb4
+ 33:     339336          0          0          0    GICv2  69 Level     ff160000.i2c
+ 34:     100001          0          0          0 rockchip_gpio_irq  24 Level     rk805
+ 35:          0          0          0          0    rk805   0 Edge      rk805_pwrkey_fall
+ 40:          0          0          0          0    rk805   5 Edge      RTC alarm
+ 42:          0          0          0          0    rk805   7 Edge      rk805_pwrkey_rise
+ 43:          1          0          0          0    GICv2  90 Level     rockchip_thermal
+ 44:          0          0          0          0    GICv2  72 Edge      ff1a0000.watchdog
+ 45:      22470          0          0          0    GICv2  46 Level     dw-mci
+ 46:     141704          0          0          0    GICv2  45 Level     dw-mci
+ 47:          0          0          0          0    GICv2 132 Level     arm-pmu
+ 48:          0          0          0          0    GICv2 133 Level     arm-pmu
+ 49:          0          0          0          0    GICv2 134 Level     arm-pmu
+ 50:          0          0          0          0    GICv2 135 Level     arm-pmu
+ 51:          0          0          0          0    GICv2  44 Level     dw-mci
+ 52:          0          0          0          0    GICv2 115 Level     ff430000.phy
+ 53:          0          0          0          0    GICv2  67 Level     ff3c0000.hdmi, dw-hdmi-cec
+ 54:          0          0          0          0    GICv2  53 Level     eth0
+ 55:          0          0          0          0    GICv2 119 Level     gpmmu
+ 56:          0          0          0          0    GICv2 121 Level     ppmmu0
+ 57:          0          0          0          0    GICv2 124 Level     ppmmu1
+ 58:          0          0          0          0    GICv2 122 Level     gp
+ 59:          0          0          0          0    GICv2 120 Level     pp0
+ 60:          0          0          0          0    GICv2 123 Level     pp1
+ 61:          0          0          0          0    GICv2 125 Level     pp_bcast
+ 62:          0          0          0          0    GICv2  65 Level     ff390000.rga
+ 63:          0          0          0          0    GICv2  39 Level     ff360000.video-codec
+ 64:          0          0          0          0    GICv2  41 Level     ff350000.video-codec
+IPI0:     53372     152860     145772     150709       Rescheduling interrupts
+IPI1:     15899      59143      34325      32563       Function call interrupts
+IPI2:         0          0          0          0       CPU stop interrupts
+IPI3:         0          0          0          0       CPU stop NMIs
+IPI4:     12290      10186      14671      12538       Timer broadcast interrupts
+IPI5:     64012      20966      30658      13355       IRQ work interrupts
+IPI6:         0          0          0          0       CPU backtrace interrupts
+IPI7:         0          0          0          0       KGDB roundup interrupts
+Err:          0
+[   18.979287] znp-k1 kernel: /i2c@ff160000/pmic@18: Fixed dependency cycle(s) with /i2c@ff160000/pmic@18/regulators/DCDC_REG4
+[   19.089291] znp-k1 kernel: input: rk805 pwrkey as /devices/platform/ff160000.i2c/i2c-1/1-0018/rk805-pwrkey.5.auto/input/input0
+[   60.076140] znp-k1 kernel: irq 34: nobody cared (try booting with the "irqpoll" option)
+[   60.079938] znp-k1 kernel: [<00000000a9d81f33>] irq_default_primary_handler threaded [<00000000189658ee>] regmap_irq_thread
+=== relevant GPIO ownership ===
+gpioinfo: cannot find line 'gpiochip1'
+gpioinfo: cannot find line 'gpiochip2'
+=== toolhead power ===
+● opennept4une-toolhead-power.service - Enable OpenNept4une USB-C toolhead power
+     Loaded: loaded (/etc/systemd/system/opennept4une-toolhead-power.service; enabled; preset: enabled)
+     Active: active (exited) since Sat 2025-11-22 15:25:42 UTC; 9 months 1 day ago
+ Invocation: d85db281494e4b93a5f5a51846c4731b
+       Docs: https://github.com/OpenNeptune3D/OpenNept4une
+   Main PID: 527 (code=exited, status=0/SUCCESS)
+   Mem peak: 1.9M
+        CPU: 120ms
+
+Nov 22 15:25:29 znp-k1 systemd[1]: Starting opennept4une-toolhead-power.service - Enable OpenNept4une USB-C toolhead power...
+Nov 22 15:25:42 znp-k1 systemd[1]: Finished opennept4une-toolhead-power.service - Enable OpenNept4une USB-C toolhead power.
+gpio=82 direction=out value=1
+Bus 001 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 001 Device 003: ID 1d50:614e OpenMoko, Inc. stm32f103xe
+Bus 002 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 003 Device 001: ID 1d6b:0002 Linux Foundation 2.0 root hub
+Bus 004 Device 001: ID 1d6b:0001 Linux Foundation 1.1 root hub
+Bus 005 Device 001: ID 1d6b:0003 Linux Foundation 3.0 root hub
+total 0
+lrwxrwxrwx 1 root root 13 Nov 22  2025 usb-Klipper_stm32f103xe_105B303534340C0039333032-if00 -> ../../ttyACM0
