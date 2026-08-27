@@ -18,6 +18,8 @@
 > [full bring-up and recovery guide](docs/neptune-4-max-znp-k1-2.3-usb-c-guide.md).
 > Implementation status and remaining physical validation are in the
 > [board support notes](docs/znp-k1-v2.3-usb-c.md).
+> Do not install or enable `display_connector` on this configuration; observed
+> host I/O contention can disrupt communication with the main MCU.
 
 ---
 

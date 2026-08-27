@@ -47,6 +47,10 @@ test -f "${TEST_ROOT}/etc/systemd/system/opennept4une-toolhead-power.service"
 grep -Fxq 'ExecStartPost=/bin/sleep 12' \
     "${TEST_ROOT}/etc/systemd/system/opennept4une-toolhead-power.service"
 test -f "${TEST_ROOT}/etc/systemd/system/klipper.service.d/20-opennept4une-toolhead-power.conf"
+grep -Fxq 'Nice=-18' \
+    "${TEST_ROOT}/etc/systemd/system/klipper.service.d/20-opennept4une-toolhead-power.conf"
+grep -Fxq 'IOSchedulingPriority=1' \
+    "${TEST_ROOT}/etc/systemd/system/klipper.service.d/20-opennept4une-toolhead-power.conf"
 test -L "${TEST_ROOT}/etc/systemd/system/multi-user.target.wants/opennept4une-toolhead-power.service"
 
 # Re-applying the same selection is idempotent.

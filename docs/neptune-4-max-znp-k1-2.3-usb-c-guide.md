@@ -1,6 +1,6 @@
 # OpenNept4une bring-up: Neptune 4 Max, ZNP-K1-2.3, USB-C toolhead
 
-Last verified: 2026-08-24
+Last verified: 2026-08-27
 
 This runbook covers this exact target:
 
@@ -9,7 +9,7 @@ This runbook covers this exact target:
 - factory USB-C toolhead with a separate toolhead MCU
 - Cartographer v4 over USB
 - Logitech C920 over USB
-- the stock touchscreen through `display_connector`
+- the stock touchscreen left unmanaged because `display_connector` causes MCU I/O instability on this hardware
 
 ## Read this first
 
@@ -22,7 +22,7 @@ The safe conclusion from comparing and then integrating the repositories is:
 3. Use this fork on `dev`; it contains the missing board integration and flashing safeguards.
 4. Run its board-hardware installer against the mounted image before first boot. It selects the board-2.3 DTB and installs persistent GPIO82 toolhead power with rollback state.
 5. Use its guarded, bundled `n4flash` flow for the USB-C toolhead; do not target a `/dev/ttyACM*` node manually.
-6. Bring up the stock probe first. Add Cartographer, camera, and display one at a time only after the printer is stable.
+6. Bring up the stock probe first. Add Cartographer and the camera one at a time only after the printer is stable. Do not install `display_connector` on this hardware.
 
 Keep the machine cold while commissioning it. Do not home Z, move an axis, or command a heater until the relevant endstop, probe, temperature, and pin checks have passed.
 
@@ -95,9 +95,9 @@ Use this order. Each phase has a go/no-go gate so a peripheral failure cannot be
 8. Generate the Max/2.3/USB-C configuration so Klipper can identify the installed MCUs.
 9. Update and verify the main MCU, then verify or update the virtual Linux MCU separately.
 10. Establish a working baseline using the factory inductive probe.
-11. Add and calibrate Cartographer.
+11. Update Cartographer to v4 USB Lite firmware, then add and calibrate it.
 12. Add the C920.
-13. Enable `display_connector` without changing the screen firmware.
+13. Keep `display_connector` and its display/affinity services disabled.
 14. Make a new golden eMMC image after everything is proven.
 
 The patched MCU updater no longer offers **All**. Update exactly one MCU per invocation.
@@ -795,9 +795,32 @@ The USB-C toolhead rail is controlled by RK3328 GPIO2_C2, exposed by this image 
 grep '^fdtfile=' /boot/armbianEnv.txt
 systemctl status opennept4une-toolhead-power.service --no-pager
 systemctl cat klipper.service
+systemctl show klipper.service -p Nice -p IOSchedulingPriority
 sudo /usr/local/sbin/opennept4une-toolhead-power status
 lsusb
 ls -l /dev/serial/by-id/ 2>/dev/null
+```
+
+The managed Klipper drop-in must include the following exact, case-sensitive
+systemd section. These priorities reduce the chance of Klipper being delayed by
+host/eMMC I/O and reporting `Timer too close` during a print:
+
+```ini
+[Service]
+Nice=-18
+IOSchedulingPriority=1
+```
+
+The board installer writes this into
+`/etc/systemd/system/klipper.service.d/20-opennept4une-toolhead-power.conf`;
+do not edit the vendor unit by hand. After applying an updated checkout, verify
+that `systemctl cat` shows the block and that `systemctl show` reports `Nice=-18`
+and `IOSchedulingPriority=1`. Restart Klipper after changing an already-running
+machine:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart klipper.service
 ```
 
 If the service/helper is absent, deploy this fork as described in section 6 and then apply the integration online:
@@ -1347,6 +1370,11 @@ The two URLs must agree. Keep updates disabled while the deployed working tree
 is dirty or contains unpushed integration work; after committing and pushing,
 both update mechanisms follow the personal fork.
 
+The generic configuration set may also contain an `[update_manager display]`
+block. Remove that complete block for this hardware and restart Moonraker; the
+display connector itself must remain uninstalled and disabled as specified in
+section 13.
+
 ## 10. Cold commissioning and factory-probe baseline
 
 With nozzle and bed cold, restart Klipper and inspect the logs:
@@ -1487,6 +1515,10 @@ Cartographer installation or calibration problems.
 - Supply **5 V only**. Applying 24 V destroys the probe.
 - Use Cartographer's supplied USB harness back to the host SBC or a good powered hub. The USB-C toolhead MCU is not a generic Cartographer USB port.
 - Mount the coil rigidly, flat, and approximately 2.6-3.0 mm above the nozzle tip for Survey Touch.
+- The Max's large auxiliary fan bar behind the X axis can collide with the
+  Cartographer body/mount and, on some assemblies, the protruding screws behind
+  the toolhead bearings. Resolve that mechanical interference before powered
+  motion.
 - Keep metal outside the documented keep-out area.
 - The supplied USB lead is not normally cable-chain rated; strain-relieve it along an umbilical/Bowden route.
 - Prefer Cartographer direct to the host and the C920 on a powered hub if the physical ports allow it.
@@ -1497,7 +1529,55 @@ Official references:
 - [Wiring diagrams](https://docs.cartographer3d.com/cartographer-probe/installation-and-setup/probe-installation/wiring-diagrams)
 - [Scan calibration](https://docs.cartographer3d.com/cartographer-probe/installation-and-setup/software-configuration/scan-calibration)
 - [Touch calibration](https://docs.cartographer3d.com/cartographer-probe/installation-and-setup/software-configuration/touch-calibration)
+- [Axis twist compensation](https://docs.cartographer3d.com/cartographer-probe/features/axis-twist-compensation)
+- [Full versus Lite firmware](https://docs.cartographer3d.com/cartographer-probe/firmware#full-vs-lite-firmwares)
 - [Print-start template](https://docs.cartographer3d.com/cartographer-probe/installation-and-setup/software-configuration/print_start-template)
+
+Follow those current pages in that order: install/configure the plugin, create
+and save the manual scan model, and only then calibrate Survey Touch. The
+machine-specific commands and coordinates below adapt that official workflow
+to the validated Max configuration; they do not replace the safety notes on
+the linked pages.
+
+### Auxiliary fan-bar clearance
+
+The stock Neptune 4 Max auxiliary fan bar sits close behind the toolhead. With
+the Cartographer mount used in this guide it may strike the probe, and normal
+assembly tolerance can also let it strike the rear toolhead-bearing screws. A
+6 mm setback was not enough in physical testing, and stacking two short
+spacers directed the fan airflow at the probe. Use four 20 mm spacers and four
+80 mm M4 screws to move the complete bar rearward instead. The updated spacer
+is available here:
+
+- [Neptune 4 Max auxiliary fan-bar spacer](https://www.thingiverse.com/thing:7401156)
+
+Treat the printed spacer as an installation aid, not proof of clearance. Check
+that the 80 mm screws suit the actual printer and printed parts, and require
+full safe thread engagement without a screw protruding into a belt, wheel,
+cable, or moving component. The 20 mm setback must leave the airflow passing
+under the hotend rather than directly over the Cartographer. With power off,
+slowly move the toolhead
+through the complete X travel and inspect from above, behind, and both ends.
+Check the Cartographer PCB/coil, its mount and USB cable, every rear
+toolhead-bearing screw, the fan-bar housing, and the Z-upright/end clearances.
+Allow extra margin for cable flex and vibration rather than accepting parts
+that merely touch at rest.
+
+After tightening the spacer and fan bar, repeat the full manual sweep and check
+that the bar is rigid, its wiring is strain-relieved, and no fan intake or
+outlet is obstructed. Do not begin `G28`, corner verification, axis-twist, or
+resonance motion until this test passes. Recheck all fasteners and clearance
+after the first resonance test and several heat cycles.
+
+Alternatively, remove the auxiliary fan bar completely. Secure its loose cable
+to the hotend cable with a zip tie so that it cannot flap into an axis, belt,
+wheel, or hot component. Never leave the disconnected cable free to move.
+
+The linked Cartographer mount is screwed down on only one side. After its
+position and offset have been verified, place a small blob of suitable glue on
+the unscrewed side so vibration cannot let the probe pivot. Keep glue away from
+the PCB, coil, connector, and any surface needed for later service; recheck that
+the probe remains flat and at the required nozzle-to-coil height.
 
 ### Record USB topology and back up configuration
 
@@ -1552,6 +1632,30 @@ sudo systemctl restart moonraker.service
 ```
 
 Remove any old legacy `[scanner]` section, old Cartographer plugin files, or old updater block before installing this current plugin.
+
+### Update the Cartographer firmware before calibration
+
+Firmware update is part of this installation, not an optional troubleshooting
+step. Stop the C920 stream, then use the current official updater:
+
+```bash
+cd ~
+if [ ! -d ~/cartographer_firmware/.git ]; then
+  git clone https://github.com/Cartographer3D/cartographer_firmware.git
+fi
+cd ~/cartographer_firmware
+git pull --ff-only
+./fw_update.sh
+```
+
+Select **v4**, **USB**, and **Lite**. Lite reduces USB bandwidth and host work
+while retaining the probe functions needed here. The Full build's denser sample
+stream is intended for substantially more capable hosts; on the ZNP-K1 it adds
+load alongside the THR MCU and webcam and increases the risk of timing trouble.
+Never flash v3, CAN, or a mismatched bootloader-offset image. Let the current
+updater manifest select the compatible Lite artifact, allow it to finish, then
+power-cycle/reconnect the probe and verify its persistent by-id path before
+continuing.
 
 ### Replace the stock probe configuration
 
@@ -1615,21 +1719,108 @@ The generated safe-home, bed-mesh, screws, and axis-twist coordinates are tied t
 
 Jog every proposed mesh corner and every `screws_tilt_adjust` point at high Z. Verify the coil remains over steel, the coil is over the intended screw when probing it, and the nozzle remains within travel. Do not copy guessed mount offsets into the image.
 
-A starting bed-mesh shape is:
+For the mount-specific `0,20.6` offset, use this internally consistent safe
+home and conservative mesh:
 
 ```ini
+[safe_z_home]
+home_xy_position: 215,194.4
+speed: 100
+z_hop: 10
+z_hop_speed: 5
+
 [bed_mesh]
 zero_reference_position: 215,215
 speed: 300
 horizontal_move_z: 3
-mesh_min: <VERIFIED-COIL-X-MIN>,<VERIFIED-COIL-Y-MIN>
-mesh_max: <VERIFIED-COIL-X-MAX>,<VERIFIED-COIL-Y-MAX>
+mesh_min: 10,21
+mesh_max: 397,404
 probe_count: 20,20
 adaptive_margin: 10
 mesh_pps: 0,0
 ```
 
-Disable or clear the old `[axis_twist_compensation]` data initially. Recalibrate it with the current Cartographer command only after scan/touch calibration is complete.
+`home_xy_position` is a nozzle/toolhead coordinate; the bed-mesh bounds and
+zero reference are physical probe/coil coordinates. The new home position puts
+the coil at `(215,215)` because `(215,194.4) + (0,20.6) = (215,215)`. The old
+stock value `239.75,194.55` compensated for the stock probe's approximately
+`-24.25,20.45` offset and must not be retained for this Cartographer mount.
+
+At the proposed mesh corners, Klipper commands these nozzle positions:
+
+| Coil coordinate | Nozzle coordinate |
+|---|---|
+| `10,21` | `10,0.4` |
+| `397,21` | `397,0.4` |
+| `397,404` | `397,383.4` |
+| `10,404` | `10,383.4` |
+
+They are inside the configured `-2..430` X/Y travel, but still require a
+high-Z physical check: the complete coil must remain over steel at each point.
+Increase an edge margin if the printed mount or plate placement requires it;
+do not enlarge this starting rectangle without measuring it.
+
+Replace the generated stock-probe screw coordinates with these nozzle
+coordinates, which put the `0,20.6` Cartographer coil over the same physical
+Max screw and fixed-mount positions:
+
+```ini
+[screws_tilt_adjust]
+screw1: 215,254.4
+screw1_name: middle-rear bed mount (shim adjust)
+screw2: 215,134.4
+screw2_name: middle-front bed mount (shim adjust)
+screw3: 32.5,376.9
+screw3_name: rear left screw
+screw4: 32.5,194.4
+screw4_name: center left screw
+screw5: 32.5,11.9
+screw5_name: front left screw
+screw6: 397.5,11.9
+screw6_name: front right screw
+screw7: 397.5,194.4
+screw7_name: center right screw
+screw8: 397.5,376.9
+screw8_name: rear right screw
+horizontal_move_z: 5
+speed: 150
+screw_thread: CW-M4
+```
+
+The complete working configuration supplied during physical commissioning was
+cross-checked against these values. It also uses this active axis-twist region:
+
+```ini
+[axis_twist_compensation]
+calibrate_start_x: 25
+calibrate_end_x: 395
+calibrate_y: 210
+```
+
+Its saved block confirms that both a Cartographer scan model and Touch model
+exist and that the probe reports v4 USB Lite firmware. Do not copy its USB
+serial, scan coefficients, Touch threshold/Z offset, mesh points, axis-twist
+results, PID values, or input-shaper results: all are specific to the physical
+machine and must be generated locally.
+
+Clear the old stock-probe axis-twist result before restarting. Back up
+`printer.cfg`, then remove only the saved block at the bottom resembling:
+
+```ini
+#*# [axis_twist_compensation]
+#*# z_compensations = ...
+#*# compensation_start_x = ...
+#*# compensation_end_x = ...
+```
+
+Also remove saved `zy_compensations`, `compensation_start_y`, and
+`compensation_end_y` entries if present. Keep the active
+`[axis_twist_compensation]` section; the current Cartographer plugin needs that
+section in order to register its automatic calibration command. Klipper does
+not expose an `AXIS_TWIST_COMPENSATION_CLEAR` G-code. Restart immediately after
+removing the saved values so the old compensation is no longer active. Later,
+use `CARTOGRAPHER_AXIS_TWIST_COMPENSATION`, not the generated manual
+`Axis_Twist_Comp_Tune` macro.
 
 Do not enable Cartographer's optional ADXL during initial probe bring-up. The
 generated USB-C configuration already uses the toolhead's LIS2DW for X and the
@@ -1719,74 +1910,131 @@ Inspect the section search: there must be one active `[mcu cartographer]` and `[
 
 ### Calibration order
 
-Have emergency stop/power within reach and watch every first descent:
+The required dependency order is:
 
-1. Verify X/Y travel, signs of measured offsets, safe-home point, and every mesh corner at high Z.
-2. `G28 X Y`
-3. Perform an initial `CARTOGRAPHER_SCAN_CALIBRATE` and paper test so the new
-   probe can establish Z safely.
-4. Mechanically tram the bed with the recalculated Cartographer screw
-   coordinates.
-5. Because moving the bed screws changes the probe/nozzle relationship, repeat
-   scan calibration after the final screw adjustment.
-6. Clean the plate and nozzle; confirm the coil remains 2.6-3.0 mm above the nozzle.
-7. Perform `CARTOGRAPHER_TOUCH_CALIBRATE` only after the bed plane and scan
-   calibration are final.
-8. Verify `CARTOGRAPHER_QUERY FIELD=all`, `PROBE_ACCURACY`, and
-   `CARTOGRAPHER_TOUCH_ACCURACY` using the current plugin's syntax.
-9. Run a full `BED_MESH_CALIBRATE` only after those checks pass.
+1. Verify geometry and clear every stock-probe calibration.
+2. Create the initial scan model with the manual paper/feeler-gauge procedure.
+3. Calibrate Survey Touch only after that scan model has been saved.
+4. Mechanically tram the bed.
+5. Recheck Touch against the final bed plane.
+6. Verify scan and Touch repeatability.
+7. Calibrate axis twist using Cartographer's automatic scan-plus-touch command.
+8. Create the final heated bed mesh.
+9. Validate a first layer and persist the Touch-model Z offset.
+10. Only then change accelerometers and calibrate input shaping.
 
-The concrete scan and paper-test sequence is:
+Have emergency stop/power within reach and watch every first descent. Do not
+enter undocumented `START` or `MAX` overrides to force Touch calibration past a
+failure.
+
+#### 1. Verify the reachable geometry
+
+With the gantry/nozzle physically clear of the plate, home X/Y only and visit
+the nozzle coordinates corresponding to each mesh corner and the proposed home
+point:
 
 ```text
 G28 X Y
-CARTOGRAPHER_SCAN_CALIBRATE
-TESTZ Z=-0.1
-TESTZ Z=-0.05
+G90
+G1 X10 Y0.4 F6000
+G1 X397 Y0.4 F6000
+G1 X397 Y383.4 F6000
+G1 X10 Y383.4 F6000
+G1 X215 Y194.4 F6000
+```
+
+At the final point the coil must be at physical `(215,215)`. Stop if the coil
+leaves the steel, an axis approaches an unsafe limit, or the configured offset
+direction is wrong.
+
+#### 2. Create the initial scan model manually
+
+Do this manual calibration before the initial Touch calibration. On this
+installation, attempting the Touch-first shortcut left no scan map for the
+following calibration and blocked progress. Clean the nozzle and plate, keep
+the nozzle cold, reconfirm that the coil is rigid and 2.6-3.0 mm above the
+nozzle, then run:
+
+```text
+G28 X Y
+G1 X215 Y194.4 F6000
+CARTOGRAPHER_SCAN_CALIBRATE METHOD=manual
+```
+
+Lower the nozzle carefully using the web UI or small `TESTZ` steps until a
+clean sheet of ordinary paper or a 0.1 mm feeler gauge just drags:
+
+```text
 TESTZ Z=-0.01
 ACCEPT
 SAVE_CONFIG
 ```
 
-After Klipper restarts, mechanically tram the bed using the new probe:
+Watch every descent and use `ABORT` if motion is unsafe. `SAVE_CONFIG` must
+complete and restart Klipper; do not proceed until the saved default scan model
+loads without a `no scan map`/`no scan model` error.
+
+#### 3. Calibrate Survey Touch
+
+After Klipper restarts with the manual scan model, clean the nozzle and plate
+again and run:
+
+```text
+G28 X Y
+G1 X215 Y194.4 F6000
+CARTOGRAPHER_TOUCH_CALIBRATE
+SAVE_CONFIG
+```
+
+Touch calibration deliberately brings the nozzle into contact with the plate.
+Stop on a false trigger, missed contact, or any model/map error. Do not use the
+Touch-first shortcut on this machine even though newer generic Cartographer
+documentation describes it.
+
+#### 4. Mechanically tram the bed
+
+After the restart, use the recalculated Cartographer screw coordinates:
 
 ```text
 BED_LEVEL_SCREWS_TUNE
 ```
 
-This uses the initial scan calibration to home Z and repeats the same mechanical
-tramming pattern used for the stock probe. `BED_LEVEL_SCREWS_TUNE` is safe here
-only after its screw coordinates and the Cartographer homing path have been
-verified at high Z. Adjust the knobs and repeat until each point is
-approximately `00:05` or better.
+The macro clears the mesh, selects the existing bed target or 60 C, waits,
+homes, and runs `SCREWS_TILT_CALCULATE`. Adjust the six normal bed knobs in the
+reported direction and clock amount. The middle-front and middle-rear fixed
+mounts are references/shim checks, not ordinary adjustment knobs. Repeat until
+every adjustable point is approximately `00:05` or better. Stop if the coil is
+not centred over any named physical point.
 
-Tramming changed the bed plane, so redo scan calibration rather than preserving
-the bootstrap result. Turn the heaters off and let the clean bed and nozzle
-return to room temperature before repeating the paper test:
+#### 5. Recheck Touch against the final bed plane
+
+Changing the screws changes the bed plane. Clean the nozzle and plate again and
+repeat the Touch calibration:
 
 ```text
 TURN_OFF_HEATERS
 G28 X Y
-CARTOGRAPHER_SCAN_CALIBRATE
-TESTZ Z=-0.1
-TESTZ Z=-0.05
-TESTZ Z=-0.01
-ACCEPT
-SAVE_CONFIG
-```
-
-After Klipper restarts, clean the plate and nozzle, reconfirm the coil height,
-then complete touch calibration against the final bed plane and save it
-separately:
-
-```text
-G28 X Y
+G1 X215 Y194.4 F6000
 CARTOGRAPHER_TOUCH_CALIBRATE
 SAVE_CONFIG
 ```
 
-After the next restart, use the same bed temperature and ten-minute soak as the
-stock baseline, verify repeatability, and generate a fresh Cartographer mesh:
+After the restart:
+
+```text
+G28 X Y
+CARTOGRAPHER_QUERY FIELD=all
+```
+
+The previously saved manual scan model remains the bootstrap map used by scan
+operations. Do not remove it. If either model fails to load after the restart,
+stop rather than attempting bed meshing.
+
+#### 6. Heat soak, verify repeatability, then calibrate axis twist
+
+Axis-twist compensation requires both valid scan and Touch models. Run it
+after tramming and before creating the mesh, because its correction changes
+the probe values used by bed meshing:
 
 ```text
 BED_MESH_CLEAR
@@ -1797,15 +2045,69 @@ G28
 CARTOGRAPHER_QUERY FIELD=all
 PROBE_ACCURACY SAMPLES=10
 CARTOGRAPHER_TOUCH_ACCURACY
+CARTOGRAPHER_AXIS_TWIST_COMPENSATION
+SAVE_CONFIG
+```
+
+Stop on an outlier, unexpectedly large accuracy range, contact away from the
+clean intended point, or any command error. The automatic Cartographer command
+scans and touches across the axis; it replaces the old stock-probe result. Its
+saved `z_compensations` are expected after this step.
+
+#### 7. Generate the final heated mesh
+
+`SAVE_CONFIG` restarted Klipper and disabled the heater, so restore the same
+bed temperature. If the bed cooled materially, repeat the heat soak:
+
+```text
+BED_MESH_CLEAR
+SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60
+TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=58 MAXIMUM=65
+G4 P600000
+G28
+CARTOGRAPHER_QUERY FIELD=all
 BED_MESH_CALIBRATE
 SAVE_CONFIG
 ```
 
-Do not load or retain the stock-probe mesh or Z offset. After the restart, run
-`BED_MESH_OUTPUT`, then print the saved factory-probe baseline G-code with the
-same plate, material, temperatures, and print settings. Compare first-layer
-consistency rather than comparing the two probes' numeric Z-offset values.
-Save the Cartographer mesh output and a photograph, and back up the successful
+#### 8. Establish and save the final Touch Z offset
+
+Touch calibration creates the contact-detection model; it does not replace a
+watched first-layer test and fine adjustment. Ensure the adapted `PRINT_START`
+described below uses `CARTOGRAPHER_TOUCH_HOME` after X/Y homing. The last Z-home
+mode matters: `Z_OFFSET_APPLY_PROBE` updates the model used for the most recent
+home, so do not run a normal scan-mode `G28 Z` between Touch homing and applying
+the adjustment.
+
+After the restart, run `BED_MESH_OUTPUT`, then print the saved factory-probe
+baseline G-code with the same plate, material, temperatures, and print settings.
+Watch the complete first layer. Adjust in 0.01 mm steps from Mainsail/Fluidd or
+with these commands:
+
+```text
+SET_GCODE_OFFSET Z_ADJUST=+0.01 MOVE=1
+SET_GCODE_OFFSET Z_ADJUST=-0.01 MOVE=1
+```
+
+Positive moves the nozzle away/up; negative moves it closer/down. Once the
+first layer is correct, finish or cancel the test print safely. While the live
+adjustment is still present and the last Z home was `CARTOGRAPHER_TOUCH_HOME`,
+apply the adjustment to the Touch model and then save that model to disk:
+
+```text
+Z_OFFSET_APPLY_PROBE
+SAVE_CONFIG
+```
+
+Do not hand-edit the saved Cartographer model offset. If the command reports
+that there is nothing to do, no live G-code offset was present; repeat the
+watched test instead of inventing a value. Survey Touch establishes Z at each
+print, while this saved model offset retains the small first-layer bias selected
+above.
+
+Do not load or retain the stock-probe mesh or Z offset. Compare first-layer
+consistency rather than comparing the two probes' numeric Z-offset values. Save
+the Cartographer mesh output and a photograph, and back up the successful
 configuration:
 
 ```bash
@@ -1813,17 +2115,49 @@ cp -a ~/printer_data/config \
   ~/printer_data/config.cartographer-baseline
 ```
 
+#### 9. Calibrate resonance last
+
+First complete the baseline print above. Input shaping does not establish bed
+geometry, probe calibration, or Z offset, so it must not be used to debug those
+steps. Then configure the Cartographer v4 ADXL345 for X and retain the existing
+bed-mounted `[adxl345 y]` for Y as described in the earlier optional subsection.
+Stop Crowsnest/the C920 stream and validate each sensor before moving:
+
+```bash
+sudo systemctl stop crowsnest.service 2>/dev/null || true
+sudo systemctl stop mjpg-streamer-webcam1.service 2>/dev/null || true
+```
+
+```text
+ACCELEROMETER_QUERY CHIP=x
+MEASURE_AXES_NOISE CHIP=x
+ACCELEROMETER_QUERY CHIP=y
+MEASURE_AXES_NOISE CHIP=y
+G28
+SHAPER_CALIBRATE AXIS=X
+SHAPER_CALIBRATE AXIS=Y
+SAVE_CONFIG
+```
+
+The resonance point is the nozzle coordinate `215,215,20`; it is not adjusted
+by the Cartographer probe offset. Inspect the recommendations and generated
+graphs before accepting them. Restore the known-good LIS2DW X configuration if
+the Cartographer accelerometer is noisy, clips, disconnects, or has an
+unverified axis mapping.
+
 The two commissioning checkpoints intentionally follow the same pattern:
 
 | Checkpoint | Factory inductive probe | Cartographer |
 |---|---|---|
 | Mechanical bed tramming | `BED_LEVEL_SCREWS_TUNE` | `BED_LEVEL_SCREWS_TUNE` after recalculating and verifying screw coordinates |
-| Probe/nozzle reference | `PROBE_CALIBRATE`, paper test, `ACCEPT`, `SAVE_CONFIG` | Scan calibration and paper test, final touch calibration, saving after each stage |
+| Probe/nozzle reference | `PROBE_CALIBRATE`, paper test, `ACCEPT`, `SAVE_CONFIG` | `CARTOGRAPHER_SCAN_CALIBRATE METHOD=manual`, paper/feeler test, `ACCEPT`, `SAVE_CONFIG`; only then `CARTOGRAPHER_TOUCH_CALIBRATE` and `SAVE_CONFIG` |
 | Repeatability | `PROBE_ACCURACY SAMPLES=10` | `CARTOGRAPHER_QUERY`, `PROBE_ACCURACY SAMPLES=10`, and `CARTOGRAPHER_TOUCH_ACCURACY` |
+| Axis twist | Manual stock-probe calibration | Clear the stock result; run `CARTOGRAPHER_AXIS_TWIST_COMPENSATION` after final tramming/models and before meshing |
 | Bed compensation | Fresh full `BED_MESH_CALIBRATE` | Discard stock mesh; create a fresh full `BED_MESH_CALIBRATE` |
 | Print validation | Save first-layer test G-code, settings, mesh output, and photograph | Repeat the same G-code/settings and compare first-layer consistency |
 
-For the first-layer adjustment, use `CARTOGRAPHER_TOUCH_HOME`, babystep carefully, then `Z_OFFSET_APPLY_PROBE` and `SAVE_CONFIG`. Do not hand-edit the saved model's Z offset.
+Follow step 8 for the watched first-layer adjustment and Touch-model
+`Z_OFFSET_APPLY_PROBE`; do not hand-edit the saved model offset.
 
 The generated `PRINT_START` macro must also be adapted. Its current order meshes immediately after `CG28`. For Survey Touch, the important order is:
 
@@ -1834,26 +2168,112 @@ The generated `PRINT_START` macro must also be adapted. Its current order meshes
 5. run full/adaptive `BED_MESH_CALIBRATE`;
 6. heat the nozzle to print temperature and prime.
 
-Use Cartographer's current print-start template when editing the macro rather than copying an old macro from a forum post.
+The full macro belongs in `printer.cfg`, not in the slicer. The physically
+working configuration uses this implementation, adapted from Cartographer's
+current print-start template and OpenNept4une's existing macros:
+
+```ini
+[gcode_macro PRINT_START]
+gcode:
+    Frame_Light_ON
+    Part_Light_ON
+    G92 E0
+    G90
+    SET_GCODE_OFFSET Z=0
+    BED_MESH_CLEAR
+
+    {% set BED_TEMP = params.BED_TEMP|default(60)|float %}
+    {% set BED_HEAT_SOAK_MINUTES = params.BED_HEAT_SOAK_MINUTES|default(0)|float %}
+    {% set BED_MESH = params.BED_MESH|default('adaptive')|string %}
+    {% set EXTRUDER_TEMP = params.EXTRUDER_TEMP|default(200)|float %}
+
+    SET_BED_TEMPERATURE TARGET={BED_TEMP}
+    BED_TEMPERATURE_WAIT MINIMUM={BED_TEMP-2} MAXIMUM={BED_TEMP+4}
+    {% if BED_HEAT_SOAK_MINUTES > 0 %}
+      RESPOND MSG="Waiting {BED_HEAT_SOAK_MINUTES} minutes for the bed to settle."
+      G4 P{BED_HEAT_SOAK_MINUTES * 60000}
+    {% endif %}
+
+    CG28
+
+    SET_HEATER_TEMPERATURE HEATER=extruder TARGET=150
+    TEMPERATURE_WAIT SENSOR=extruder MINIMUM=145 MAXIMUM=150
+    CARTOGRAPHER_TOUCH_HOME
+
+    {% if BED_MESH == 'full' %}
+      BED_MESH_CALIBRATE
+    {% elif BED_MESH == 'adaptive' %}
+      BED_MESH_CALIBRATE ADAPTIVE=1
+    {% elif BED_MESH != 'none' %}
+      BED_MESH_PROFILE LOAD={BED_MESH}
+    {% endif %}
+
+    Smart_Park
+    SET_FILAMENT_SENSOR SENSOR=filament_sensor ENABLE=1
+    SET_HEATER_TEMPERATURE HEATER=extruder TARGET={EXTRUDER_TEMP}
+    TEMPERATURE_WAIT SENSOR=extruder MINIMUM={EXTRUDER_TEMP-4} MAXIMUM={EXTRUDER_TEMP+10}
+    LINE_PURGE
+    G92 E0
+    G1 Z2.0 F3000
+    M117 Printing
+```
+
+This assumes the named OpenNept4une/KAMP macros and filament sensor exist. If a
+feature was deliberately removed, remove only its corresponding call. Do not
+move Touch homing after final nozzle heat: Cartographer requires it at no more
+than 150 C.
+
+In OrcaSlicer, put only this macro invocation under **Printer settings >
+Machine G-code > Machine start G-code**:
+
+```text
+PRINT_START BED_TEMP=[bed_temperature_initial_layer_single] EXTRUDER_TEMP=[nozzle_temperature_initial_layer] BED_MESH=adaptive BED_HEAT_SOAK_MINUTES=0
+```
+
+Put `PRINT_END` in **Machine end G-code**. Do not duplicate homing, temperature
+waits, meshing, Touch homing, or the purge line in the slicer; `PRINT_START`
+owns that sequence. Orca substitutes the bracketed placeholders while slicing.
+Inspect the beginning of an exported G-code file once and require numeric
+`BED_TEMP` and `EXTRUDER_TEMP` values rather than unresolved brackets before
+printing. Increase `BED_HEAT_SOAK_MINUTES` per material/plate when desired, or
+use `BED_MESH=full`, `none`, or a saved profile name deliberately.
 
 OpenNept4une option 1 regenerates `printer.cfg` and will restore its stock `[probe]`, mesh, home, and macro sections. Keep the pre-Cartographer backup and reapply/review the Cartographer changes after every regeneration.
 
-### Cartographer firmware
+### Cartographer firmware selection details
 
-Do not flash the probe just because it is new. First try its factory USB firmware with the current plugin. If the official updater reports that an update is required:
+Select **v4**, **USB**, and **Lite** for this ZNP-K1 installation. Lite reduces
+the number of samples sent to the Linux host while retaining the same documented
+probe features. That is the better starting point for this relatively
+low-powered host while it also runs the USB-C THR MCU, Cartographer, C920, and
+Moonraker. Full provides the denser host sample stream
+and is Cartographer's general recommendation on hosts with ample headroom; its
+practical downside here is additional host/transport load. Lite's trade-off is
+less raw sample density for unusually detailed diagnostics or aggressive scan
+experiments, not a documented loss of scan, Touch, bed-mesh, or ADXL support.
 
-```bash
-cd ~
-git clone https://github.com/Cartographer3D/cartographer_firmware.git
-cd ~/cartographer_firmware
-./fw_update.sh
-```
+Let the updater and current `firmware_list.csv` choose the compatible artifact;
+never flash a v3 or CAN binary to this v4 USB probe. For a normal Katapult
+application update, all four labels must match `V4 + USB + Lite + 8KiB offset`.
+At the date of this runbook, the manifest lists
+`CartographerV4_6.2.0_USB_lite_8kib_offset.bin` with plugin minimum 1.6.0, but
+both the version and compatibility floor will change. A combined
+`Katapult_plus_...` image is for the explicitly documented DFU bootloader
+recovery/deployment path, not a normal application update.
 
-Select **v4**, **USB**, and normally **Full**. Use Lite only for documented low-power/timing/extra-MCU issues. Let the updater and current `firmware_list.csv` choose a compatible artifact; never flash a v3 binary to v4. At the date of this runbook, the manifest lists v4 USB 6.2.0 with plugin minimum 1.6.0, but that will change.
+After any later firmware change, restart Klipper, verify the final persistent
+USB serial path and reported firmware/plugin compatibility, then redo the
+manual scan, Touch, axis-twist, and mesh calibrations in the order above. Stop
+the C920 stream during flashing and initial calibration.
 
 ## 12. Logitech C920
 
 Use exactly one webcam stack. This runbook recommends Crowsnest v5 because it supports persistent `/dev/v4l/by-id` device names. OpenNept4une's webcam wizard deliberately removes Crowsnest and installs `mjpg-streamer`, so never run both.
+
+The webcam is not configured in `printer.cfg`; that file configures Klipper
+hardware and macros. Configure the capture service on Linux, then configure its
+stream/snapshot URLs separately in the Mainsail or Fluidd camera UI as described
+below.
 
 ### Identify the capture node
 
@@ -1943,6 +2363,28 @@ The usual reverse-proxy URLs are:
 /webcam/?action=snapshot
 ```
 
+The Mainsail/Fluidd camera entry may not resolve those relative paths on this
+image. In the web UI, open **Settings > Camera (or Cameras) > USB** and enter
+absolute URLs using the printer's actual LAN address:
+
+```text
+Stream URL:   http://<printer-ip>/webcam/?action=stream
+Snapshot URL: http://<printer-ip>/webcam/?action=snapshot
+```
+
+For example, if the printer is `192.168.1.123`, enter:
+
+```text
+http://192.168.1.123/webcam/?action=stream
+http://192.168.1.123/webcam/?action=snapshot
+```
+
+Enter ordinary `http://` URLs; the backslashes sometimes shown when these
+values are pasted through Markdown are escaping only and are not part of the
+setting. A resolvable `znp-k1.local` may be used instead of the IP, but the IP
+is easier to diagnose. Save the camera entry and require both live view and a
+fresh snapshot to work from the browser used for printing.
+
 After validation, change Crowsnest's log level to `quiet` to reduce eMMC writes.
 
 If Cartographer freezes, reports `timer too close`, or an MCU disconnects, stop Crowsnest first and inspect:
@@ -1954,176 +2396,33 @@ lsusb -t
 
 A quality externally powered hub can solve power problems but cannot create more USB bandwidth. If possible, keep latency-sensitive Cartographer and the high-bandwidth C920 on different host root branches.
 
-## 13. Stock touchscreen through `display_connector`
+## 13. Keep the stock touchscreen integration disabled
 
-`display_connector/dev` supports the Neptune 4 Max and uses `/dev/ttyS1`; the main MCU uses `/dev/ttyS0`, so the USB-C THR MCU and Cartographer do not create a serial-name collision.
+Do **not** install or enable `display_connector` on this ZNP-K1-2.3 USB-C
+configuration. Physical testing found that the display workload can cause I/O
+timing problems with the main MCU. Do not run
+`OpenNept4une.sh install_screen_service`, do not flash touchscreen firmware, and
+perform all printer control and calibration through Fluidd or Mainsail.
 
-Support is conditional on the actual screen firmware and board UART routing. The project's current README explicitly documents the stock TJC4827X243_011 display with firmware 1.2.11 and 1.2.12. Current dev code recognizes additional versions, but USB-C machines have shipped with other versions. Treat any version not explicitly confirmed by the current project as unverified.
-
-Do **not** flash touchscreen firmware during initial bring-up. OpenNept4une labels that updater Alpha/Risky. The connector service can be installed without changing the screen firmware.
-
-### UART gate
-
-Before stopping the coupled release services, preserve both units, the affinity helper, and their known-good state. The current connector installer can overwrite all three files:
-
-```bash
-if [ -e ~/display-affinity-before-connector ]; then
-  echo 'Display/affinity backup already exists; preserve it and choose a new path.' >&2
-  exit 1
-fi
-for service_file in \
-  /etc/systemd/system/display.service \
-  /etc/systemd/system/affinity.service \
-  /usr/local/sbin/affinity-setup.sh; do
-  if [ ! -f "$service_file" ]; then
-    echo "Required release file is absent: $service_file" >&2
-    exit 1
-  fi
-done
-mkdir ~/display-affinity-before-connector
-systemctl cat display.service \
-  > ~/display-affinity-before-connector/systemctl-cat-display.txt || exit 1
-systemctl cat affinity.service \
-  > ~/display-affinity-before-connector/systemctl-cat-affinity.txt || exit 1
-systemctl is-enabled display.service \
-  > ~/display-affinity-before-connector/display-was-enabled.txt || true
-systemctl is-active display.service \
-  > ~/display-affinity-before-connector/display-was-active.txt || true
-systemctl is-enabled affinity.service \
-  > ~/display-affinity-before-connector/affinity-was-enabled.txt || true
-systemctl is-active affinity.service \
-  > ~/display-affinity-before-connector/affinity-was-active.txt || true
-sudo cp -a /etc/systemd/system/display.service \
-  /etc/systemd/system/affinity.service \
-  /usr/local/sbin/affinity-setup.sh \
-  ~/display-affinity-before-connector/
-sudo chown -R "$(id -u):$(id -g)" ~/display-affinity-before-connector
-```
-
-Now stop both coupled units temporarily and inspect the UART:
-
-```bash
-sudo systemctl stop display.service affinity.service
-test "$(systemctl is-active display.service)" = inactive || exit 1
-test "$(systemctl is-active affinity.service)" = inactive || exit 1
-cat /boot/.OpenNept4une.txt
-test -c /dev/ttyS1 || {
-  echo '/dev/ttyS1 is absent; do not install the connector.' >&2
-  exit 1
-}
-cat /proc/cmdline
-if grep -qw 'console=ttyS1' /proc/cmdline; then
-  echo 'ttyS1 is a kernel console; do not install the connector.' >&2
-  exit 1
-fi
-if systemctl is-active --quiet serial-getty@ttyS1.service; then
-  echo 'ttyS1 is owned by a serial getty; do not install the connector.' >&2
-  exit 1
-fi
-if sudo fuser -v /dev/ttyS1; then
-  echo 'ttyS1 is already owned by a process; do not install the connector.' >&2
-  exit 1
-fi
-```
-
-Required result: `/dev/ttyS1` exists, is not a kernel console/getty, and is not owned by another user process. The v2.0 and included v2.3 DTS files have identical UART nodes, which is encouraging but not a substitute for this hardware check.
-
-If any gate fails or you decide not to install, restore the untouched release pair with `sudo systemctl start display.service affinity.service`.
-
-### Install the matching `dev` connector
-
-This fork now initializes the direct `install_screen_service` command's branch correctly, preserves any existing checkout, and refuses a branch mismatch instead of deleting local display work. With the coupled release service files safely captured above, inspect the existing connector checkout next:
-
-```bash
-git -C ~/display_connector status --short --branch 2>/dev/null || true
-```
-
-If it is already a clean `dev` checkout, this is sufficient:
-
-```bash
-~/OpenNept4une/OpenNept4une.sh install_screen_service
-```
-
-Otherwise, preserve it and install the matching branch explicitly:
-
-```bash
-cd ~
-if [ -d ~/display_connector ]; then
-  if [ -e ~/display_connector.v0.1.7 ]; then
-    echo 'Display backup path already exists; stop and choose a new name.' >&2
-    exit 1
-  fi
-  mv ~/display_connector ~/display_connector.v0.1.7
-fi
-git clone --branch dev \
-  https://github.com/OpenNeptune3D/display_connector.git
-cd ~/display_connector
-bash ./display-service-installer.sh
-```
-
-The installer enables `display.service` and `affinity.service`, rebuilds its Python environment, changes CPU-governor behavior, and restarts Moonraker. Review those side effects when diagnosing later performance issues.
-
-Use an explicit `~/printer_data/config/display_connector.cfg`:
-
-```ini
-[general]
-printer_model = N4Max
-serial_port = /dev/ttyS1
-display_type = elegoo
-```
-
-Ensure Moonraker tracks the connector's `dev` branch:
-
-```ini
-[update_manager display]
-type: git_repo
-primary_branch: dev
-path: /home/mks/display_connector
-virtualenv: /home/mks/display_connector/venv
-requirements: requirements.txt
-origin: https://github.com/OpenNeptune3D/display_connector.git
-managed_services: display
-```
-
-Verify:
-
-```bash
-sudo systemctl restart display.service
-systemctl status display.service --no-pager
-journalctl -u display.service -b --no-pager -n 100
-tail -n 100 ~/printer_data/logs/display_connector.log
-```
-
-Current `display_connector/dev` recognizes Cartographer mesh progress, but its touchscreen Z-probe calibration page calls a macro that is not supplied by the current Cartographer plugin/config. Do all Cartographer scan, touch, and Z-offset calibration in Fluidd/Mainsail. Treat the touchscreen Z-offset page as unsupported.
-
-To roll back the connector without losing the release's latency mitigation, restore the saved connector checkout when one exists, then restore the coupled display/affinity implementation and state:
+If the connector was already installed during an earlier version of this
+guide, disable its services before printing:
 
 ```bash
 sudo systemctl disable --now display.service affinity.service
-if [ -d ~/display_connector.v0.1.7 ]; then
-  if [ -e ~/display_connector.failed-dev ]; then
-    echo 'Failed-dev preservation path exists; choose another name and stop.' >&2
-    exit 1
-  fi
-  mv ~/display_connector ~/display_connector.failed-dev
-  mv ~/display_connector.v0.1.7 ~/display_connector
-fi
-sudo install -o root -g root -m 0644 \
-  ~/display-affinity-before-connector/display.service \
-  /etc/systemd/system/display.service
-sudo install -o root -g root -m 0644 \
-  ~/display-affinity-before-connector/affinity.service \
-  /etc/systemd/system/affinity.service
-sudo install -o root -g root -m 0755 \
-  ~/display-affinity-before-connector/affinity-setup.sh \
-  /usr/local/sbin/affinity-setup.sh
-sudo systemctl daemon-reload
-sudo systemctl enable --now display.service affinity.service
-systemctl cat display.service affinity.service
-systemctl status display.service affinity.service --no-pager
+systemctl is-active display.service affinity.service
+systemctl is-enabled display.service affinity.service
 ```
 
-The base procedure deliberately verified both services as enabled and active, so the commands restore that known coupled state. If any saved `*-was-enabled.txt` or `*-was-active.txt` says otherwise, reproduce the recorded state explicitly instead. This service-and-file rollback is another reason not to flash the touchscreen firmware.
+The expected results are `inactive` and `disabled` (or `not-found` if the units
+were never installed). A stopped service that remains enabled is not sufficient
+because it will return at the next boot. The unused checkout may remain on disk;
+do not delete it as part of commissioning. Remove any active `[update_manager
+display]` block from `moonraker.conf` and restart Moonraker so its UI does not
+offer an unsupported display update:
+
+```bash
+sudo systemctl restart moonraker.service
+```
 
 ## 14. Make the fully commissioned image afterward
 
@@ -2143,7 +2442,7 @@ The best reusable image is therefore a golden image made **after** the printer w
 5. Optionally run PiShrink with `-s`, then compress with `xz -T0`.
 6. Store its checksum and a note that it contains Wi-Fi credentials and hardware serial IDs.
 
-Do not run an indiscriminate `apt full-upgrade` before creating the first working checkpoint. Apply OS, Klipper, fork, Cartographer, and display updates deliberately and one category at a time, with an eMMC/config backup first.
+Do not run an indiscriminate `apt full-upgrade` before creating the first working checkpoint. Apply OS, Klipper, fork, and Cartographer updates deliberately and one category at a time, with an eMMC/config backup first. Do not install display updates on this hardware.
 
 The golden image also contains the machine ID, SSH host keys, calibration data, and print history. Keep it private and normally restore it only to this printer. Never run `img-config/dev-image-cleanup.sh` on the commissioned machine; that script is for preparing public release images and deliberately removes identity, network, config, log, and history data.
 
@@ -2298,6 +2597,7 @@ Restoring eMMC alone does not roll back Klipper firmware already flashed into th
 - [ ] Power monitors remain quiet with both-edge mode and 20 ms debounce
 - [ ] Wi-Fi works, with Ethernet/serial fallback known
 - [ ] GPIO82 service is active and passed repeated cold boots
+- [ ] Klipper's effective systemd properties report `Nice=-18` and `IOSchedulingPriority=1`
 - [ ] This fork's working tree/commit was recorded and update origin points to `dalgibbard/OpenNept4une`
 - [ ] Safety-patched bundled `n4flash.c` hash is `fb446842...20df70` and compiled cleanly on the printer
 - [ ] Toolhead application and bootloader by-id/udev identities were captured
@@ -2309,7 +2609,9 @@ Restoring eMMC alone does not roll back Klipper firmware already flashed into th
 - [ ] Temperatures, endstops, stock probe, runout sensor, fans, lights, and motor directions checked cold
 - [ ] Factory-probe baseline print completed
 - [ ] Cartographer mount/offsets/envelope calibrated on this machine
+- [ ] Cartographer v4 reports current USB Lite firmware before calibration
+- [ ] Manual scan model was saved before Survey Touch calibration
 - [ ] C920 uses a persistent V4L path at a conservative bandwidth
-- [ ] `/dev/ttyS1` and screen version validated before enabling `display_connector`
+- [ ] `display.service` and `affinity.service` are absent or both disabled/inactive; `display_connector` was not installed
 - [ ] Touchscreen firmware was not changed during initial bring-up
 - [ ] A new working golden eMMC image was made after commissioning
